@@ -1,0 +1,268 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/go-chi/chi/v5"
+)
+
+const testEncKey = "0000000000000000000000000000000000000000000000000000000000000000"
+
+// storeGithubToken encrypts plaintext and stores it in tokenStore under userID.
+// Returns a cleanup func.
+func storeGithubToken(t *testing.T, userID, plaintext string) {
+	t.Helper()
+	enc, err := encryptToken(plaintext, testEncKey)
+	if err != nil {
+		t.Fatalf("storeGithubToken: %v", err)
+	}
+	tokenStore.Store(userID, enc)
+	t.Cleanup(func() { tokenStore.Delete(userID) })
+}
+
+// storeGitlabToken encrypts plaintext and stores a gitlabTokenEntry under userID.
+func storeGitlabToken(t *testing.T, userID, plaintext string) {
+	t.Helper()
+	enc, err := encryptToken(plaintext, testEncKey)
+	if err != nil {
+		t.Fatalf("storeGitlabToken: %v", err)
+	}
+	gitlabTokenStore.Store(userID, gitlabTokenEntry{AccessToken: enc})
+	t.Cleanup(func() { gitlabTokenStore.Delete(userID) })
+}
+
+// requestWithUser builds a request with userID injected into context.
+func requestWithUser(method, target, userID string) *http.Request {
+	req := httptest.NewRequest(method, target, nil)
+	ctx := context.WithValue(req.Context(), userIDKey, userID)
+	return req.WithContext(ctx)
+}
+
+// requestWithUserAndChi adds chi URL params on top of a user context.
+func requestWithUserAndChi(method, target, userID string, params map[string]string) *http.Request {
+	req := requestWithUser(method, target, userID)
+	rctx := chi.NewRouteContext()
+	for k, v := range params {
+		rctx.URLParams.Add(k, v)
+	}
+	ctx := context.WithValue(req.Context(), chi.RouteCtxKey, rctx)
+	return req.WithContext(ctx)
+}
+
+// ── handleListRepos ───────────────────────────────────────────────────────────
+
+func TestHandleListRepos_MissingProvider(t *testing.T) {
+	req := requestWithUser(http.MethodGet, "/repos", "user-1")
+	w := httptest.NewRecorder()
+
+	HandleListRepos(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	var body map[string]any
+	json.NewDecoder(w.Body).Decode(&body)
+	errObj, _ := body["error"].(map[string]any)
+	if errObj["code"] != "invalid_provider" {
+		t.Errorf("expected code 'invalid_provider', got %v", errObj["code"])
+	}
+}
+
+func TestHandleListRepos_GitHub(t *testing.T) {
+	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
+
+	const userID = "gh-repos-user"
+	storeGithubToken(t, userID, "gh-access-token")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Next-Page", "2")
+		json.NewEncoder(w).Encode([]githubRepoRaw{
+			{FullName: "alice/alpha", Private: false, DefaultBranch: "main"},
+			{FullName: "alice/beta", Private: true, DefaultBranch: "master"},
+		})
+	}))
+	defer srv.Close()
+
+	orig := githubAPIBase
+	githubAPIBase = srv.URL
+	t.Cleanup(func() { githubAPIBase = orig })
+
+	req := requestWithUser(http.MethodGet, "/repos?provider=github", userID)
+	w := httptest.NewRecorder()
+	HandleListRepos(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var body struct {
+		Repos    []repoItem `json:"repos"`
+		NextPage int        `json:"nextPage"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Repos) != 2 {
+		t.Fatalf("expected 2 repos, got %d", len(body.Repos))
+	}
+	if body.Repos[0].FullName != "alice/alpha" {
+		t.Errorf("repo[0].fullName = %q", body.Repos[0].FullName)
+	}
+	if body.Repos[1].Private != true {
+		t.Errorf("repo[1].private should be true")
+	}
+	// pagination: mock returned X-Next-Page: 2
+	if body.NextPage != 2 {
+		t.Errorf("expected nextPage 2, got %d", body.NextPage)
+	}
+}
+
+func TestHandleListRepos_GitLab(t *testing.T) {
+	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
+
+	const userID = "gl-repos-user"
+	storeGitlabToken(t, userID, "gl-access-token")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]gitlabProjectRaw{
+			{PathWithNamespace: "bob/gamma", Visibility: "private", DefaultBranch: "main"},
+			{PathWithNamespace: "bob/delta", Visibility: "public", DefaultBranch: "develop"},
+		})
+	}))
+	defer srv.Close()
+
+	orig := gitlabAPIBase
+	gitlabAPIBase = srv.URL
+	t.Cleanup(func() { gitlabAPIBase = orig })
+
+	req := requestWithUser(http.MethodGet, "/repos?provider=gitlab", userID)
+	w := httptest.NewRecorder()
+	HandleListRepos(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var body struct {
+		Repos    []repoItem `json:"repos"`
+		NextPage int        `json:"nextPage"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Repos) != 2 {
+		t.Fatalf("expected 2 repos, got %d", len(body.Repos))
+	}
+	if body.Repos[0].FullName != "bob/gamma" {
+		t.Errorf("repo[0].fullName = %q", body.Repos[0].FullName)
+	}
+	if body.Repos[0].Private != true {
+		t.Errorf("repo[0] visibility=private should map to private=true")
+	}
+	if body.Repos[1].Private != false {
+		t.Errorf("repo[1] visibility=public should map to private=false")
+	}
+	if body.NextPage != 0 {
+		t.Errorf("expected nextPage 0, got %d", body.NextPage)
+	}
+}
+
+// ── handleListBranches ────────────────────────────────────────────────────────
+
+func TestHandleListBranches_GitHub(t *testing.T) {
+	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
+
+	const userID = "gh-branch-user"
+	storeGithubToken(t, userID, "gh-access-token")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]map[string]string{
+			{"name": "main"},
+			{"name": "dev"},
+			{"name": "feature-x"},
+		})
+	}))
+	defer srv.Close()
+
+	orig := githubAPIBase
+	githubAPIBase = srv.URL
+	t.Cleanup(func() { githubAPIBase = orig })
+
+	req := requestWithUserAndChi(http.MethodGet,
+		"/repos/github/alice/myrepo/branches", userID,
+		map[string]string{"provider": "github", "owner": "alice", "repo": "myrepo"},
+	)
+	w := httptest.NewRecorder()
+	HandleListBranches(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var body struct {
+		Branches []string `json:"branches"`
+		NextPage int      `json:"nextPage"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := []string{"main", "dev", "feature-x"}
+	if fmt.Sprintf("%v", body.Branches) != fmt.Sprintf("%v", want) {
+		t.Errorf("branches = %v, want %v", body.Branches, want)
+	}
+	if body.NextPage != 0 {
+		t.Errorf("expected nextPage 0, got %d", body.NextPage)
+	}
+}
+
+func TestHandleListBranches_GitLab(t *testing.T) {
+	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
+
+	const userID = "gl-branch-user"
+	storeGitlabToken(t, userID, "gl-access-token")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Next-Page", "2")
+		json.NewEncoder(w).Encode([]map[string]string{
+			{"name": "main"},
+			{"name": "release"},
+		})
+	}))
+	defer srv.Close()
+
+	orig := gitlabAPIBase
+	gitlabAPIBase = srv.URL
+	t.Cleanup(func() { gitlabAPIBase = orig })
+
+	req := requestWithUserAndChi(http.MethodGet,
+		"/repos/gitlab/bob/myproject/branches", userID,
+		map[string]string{"provider": "gitlab", "owner": "bob", "repo": "myproject"},
+	)
+	w := httptest.NewRecorder()
+	HandleListBranches(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var body struct {
+		Branches []string `json:"branches"`
+		NextPage int      `json:"nextPage"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	want := []string{"main", "release"}
+	if fmt.Sprintf("%v", body.Branches) != fmt.Sprintf("%v", want) {
+		t.Errorf("branches = %v, want %v", body.Branches, want)
+	}
+	// pagination: mock returned X-Next-Page: 2
+	if body.NextPage != 2 {
+		t.Errorf("expected nextPage 2, got %d", body.NextPage)
+	}
+}
