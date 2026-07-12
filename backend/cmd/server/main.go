@@ -13,6 +13,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/golang-migrate/migrate/v4"
+	_ "github.com/golang-migrate/migrate/v4/database/postgres"
+	_ "github.com/golang-migrate/migrate/v4/source/file"
 )
 
 func main() {
@@ -33,6 +36,15 @@ func main() {
 		tokenRepo = db.NewPostgresTokenRepository(database)
 		graphRepo = db.NewPostgresGraphRepository(database)
 		log.Println("database connected")
+
+		m, err := migrate.New("file://migrations", dbURL)
+		if err != nil {
+			log.Fatalf("failed to create migrator: %v", err)
+		}
+		if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+			log.Fatalf("failed to run migrations: %v", err)
+		}
+		log.Println("migrations applied successfully")
 	} else {
 		log.Println("CODEATLAS_DB_URL not set, using in-memory repositories")
 		userRepo = db.NewMockUserRepository()
