@@ -39,6 +39,7 @@ func setStateCookie(w http.ResponseWriter, state string) {
 		Path:     "/",
 		MaxAge:   600,
 		HttpOnly: true,
+		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -197,6 +198,7 @@ func (h *AuthHandler) HandleGithubCallback(w http.ResponseWriter, r *http.Reques
 		Name:     "codeatlas_jwt",
 		Value:    signed,
 		HttpOnly: true,
+		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 		Path:     "/",
 		MaxAge:   86400,
@@ -392,6 +394,7 @@ func (h *AuthHandler) HandleGitlabCallback(w http.ResponseWriter, r *http.Reques
 		Name:     "codeatlas_jwt",
 		Value:    signed,
 		HttpOnly: true,
+		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
 		Path:     "/",
 		MaxAge:   86400,
