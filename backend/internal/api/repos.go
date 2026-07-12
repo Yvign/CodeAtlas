@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +10,14 @@ import (
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
+
+	"CodeAtlas/internal/db"
 )
+
+// ReposHandler holds the repositories used by repo/branch listing endpoints.
+type ReposHandler struct {
+	Tokens db.TokenRepository
+}
 
 // overridden in tests to point at mock servers
 var (
@@ -19,25 +27,16 @@ var (
 
 var errNoToken = errors.New("no token found")
 
-// resolveToken fetches and decrypts the stored access token for the given
-// provider and userID.
-func resolveToken(provider, userID string) (string, error) {
-	keyHex := os.Getenv("CODEATLAS_ENCRYPTION_KEY")
-	switch provider {
-	case "github":
-		val, ok := tokenStore.Load(userID)
-		if !ok {
-			return "", errNoToken
-		}
-		return decryptToken(val.(string), keyHex)
-	case "gitlab":
-		val, ok := gitlabTokenStore.Load(userID)
-		if !ok {
-			return "", errNoToken
-		}
-		return decryptToken(val.(gitlabTokenEntry).AccessToken, keyHex)
+// resolveToken fetches and decrypts the stored access token for the given provider and userID.
+func resolveToken(ctx context.Context, tokens db.TokenRepository, provider, userID string) (string, error) {
+	t, err := tokens.FindByUserAndProvider(ctx, userID, provider)
+	if err != nil {
+		return "", err
 	}
-	return "", errNoToken
+	if t == nil {
+		return "", errNoToken
+	}
+	return decryptToken(t.AccessToken, os.Getenv("CODEATLAS_ENCRYPTION_KEY"))
 }
 
 func parsePage(r *http.Request) string {
@@ -82,7 +81,7 @@ type gitlabProjectRaw struct {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-func HandleListRepos(w http.ResponseWriter, r *http.Request) {
+func (h *ReposHandler) HandleListRepos(w http.ResponseWriter, r *http.Request) {
 	provider := r.URL.Query().Get("provider")
 	if provider != "github" && provider != "gitlab" {
 		WriteJSON(w, http.StatusBadRequest, map[string]any{
@@ -99,7 +98,7 @@ func HandleListRepos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := resolveToken(provider, userID)
+	token, err := resolveToken(r.Context(), h.Tokens, provider, userID)
 	if err != nil {
 		WriteJSON(w, http.StatusUnauthorized, map[string]any{
 			"error": map[string]string{"code": "no_token", "message": "no token found for provider"},
@@ -173,7 +172,7 @@ func HandleListRepos(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, map[string]any{"repos": repos, "nextPage": nextPage})
 }
 
-func HandleListBranches(w http.ResponseWriter, r *http.Request) {
+func (h *ReposHandler) HandleListBranches(w http.ResponseWriter, r *http.Request) {
 	provider := chi.URLParam(r, "provider")
 	owner := chi.URLParam(r, "owner")
 	repo := chi.URLParam(r, "repo")
@@ -193,7 +192,7 @@ func HandleListBranches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := resolveToken(provider, userID)
+	token, err := resolveToken(r.Context(), h.Tokens, provider, userID)
 	if err != nil {
 		WriteJSON(w, http.StatusUnauthorized, map[string]any{
 			"error": map[string]string{"code": "no_token", "message": "no token found for provider"},

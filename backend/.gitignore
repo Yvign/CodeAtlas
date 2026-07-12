@@ -1,7 +1,5 @@
 .env
+.env.*
+!.env.example
 
 .github
-Makefile
-Dockerfile
-docker-compose.yml
-migrations/

@@ -9,31 +9,44 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+
+	"CodeAtlas/internal/db"
 )
 
 const testEncKey = "0000000000000000000000000000000000000000000000000000000000000000"
 
-// storeGithubToken encrypts plaintext and stores it in tokenStore under userID.
-// Returns a cleanup func.
-func storeGithubToken(t *testing.T, userID, plaintext string) {
+// newTestReposHandler creates a ReposHandler with a fresh mock token repo.
+func newTestReposHandler() (*ReposHandler, *db.MockTokenRepository) {
+	mockTokens := db.NewMockTokenRepository()
+	return &ReposHandler{Tokens: mockTokens}, mockTokens
+}
+
+// storeGithubToken encrypts plaintext and stores it in the given mock token repo under userID.
+func storeGithubToken(t *testing.T, tokens *db.MockTokenRepository, userID, plaintext string) {
 	t.Helper()
 	enc, err := encryptToken(plaintext, testEncKey)
 	if err != nil {
 		t.Fatalf("storeGithubToken: %v", err)
 	}
-	tokenStore.Store(userID, enc)
-	t.Cleanup(func() { tokenStore.Delete(userID) })
+	tokens.Upsert(context.Background(), db.OAuthToken{
+		UserID:      userID,
+		Provider:    "github",
+		AccessToken: enc,
+	})
 }
 
-// storeGitlabToken encrypts plaintext and stores a gitlabTokenEntry under userID.
-func storeGitlabToken(t *testing.T, userID, plaintext string) {
+// storeGitlabToken encrypts plaintext and stores it in the given mock token repo under userID.
+func storeGitlabToken(t *testing.T, tokens *db.MockTokenRepository, userID, plaintext string) {
 	t.Helper()
 	enc, err := encryptToken(plaintext, testEncKey)
 	if err != nil {
 		t.Fatalf("storeGitlabToken: %v", err)
 	}
-	gitlabTokenStore.Store(userID, gitlabTokenEntry{AccessToken: enc})
-	t.Cleanup(func() { gitlabTokenStore.Delete(userID) })
+	tokens.Upsert(context.Background(), db.OAuthToken{
+		UserID:      userID,
+		Provider:    "gitlab",
+		AccessToken: enc,
+	})
 }
 
 // requestWithUser builds a request with userID injected into context.
@@ -57,10 +70,11 @@ func requestWithUserAndChi(method, target, userID string, params map[string]stri
 // ── handleListRepos ───────────────────────────────────────────────────────────
 
 func TestHandleListRepos_MissingProvider(t *testing.T) {
+	h, _ := newTestReposHandler()
 	req := requestWithUser(http.MethodGet, "/repos", "user-1")
 	w := httptest.NewRecorder()
 
-	HandleListRepos(w, req)
+	h.HandleListRepos(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", w.Code)
@@ -76,8 +90,9 @@ func TestHandleListRepos_MissingProvider(t *testing.T) {
 func TestHandleListRepos_GitHub(t *testing.T) {
 	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
 
+	h, mockTokens := newTestReposHandler()
 	const userID = "gh-repos-user"
-	storeGithubToken(t, userID, "gh-access-token")
+	storeGithubToken(t, mockTokens, userID, "gh-access-token")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Next-Page", "2")
@@ -94,7 +109,7 @@ func TestHandleListRepos_GitHub(t *testing.T) {
 
 	req := requestWithUser(http.MethodGet, "/repos?provider=github", userID)
 	w := httptest.NewRecorder()
-	HandleListRepos(w, req)
+	h.HandleListRepos(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -116,7 +131,6 @@ func TestHandleListRepos_GitHub(t *testing.T) {
 	if body.Repos[1].Private != true {
 		t.Errorf("repo[1].private should be true")
 	}
-	// pagination: mock returned X-Next-Page: 2
 	if body.NextPage != 2 {
 		t.Errorf("expected nextPage 2, got %d", body.NextPage)
 	}
@@ -125,8 +139,9 @@ func TestHandleListRepos_GitHub(t *testing.T) {
 func TestHandleListRepos_GitLab(t *testing.T) {
 	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
 
+	h, mockTokens := newTestReposHandler()
 	const userID = "gl-repos-user"
-	storeGitlabToken(t, userID, "gl-access-token")
+	storeGitlabToken(t, mockTokens, userID, "gl-access-token")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]gitlabProjectRaw{
@@ -142,7 +157,7 @@ func TestHandleListRepos_GitLab(t *testing.T) {
 
 	req := requestWithUser(http.MethodGet, "/repos?provider=gitlab", userID)
 	w := httptest.NewRecorder()
-	HandleListRepos(w, req)
+	h.HandleListRepos(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -177,8 +192,9 @@ func TestHandleListRepos_GitLab(t *testing.T) {
 func TestHandleListBranches_GitHub(t *testing.T) {
 	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
 
+	h, mockTokens := newTestReposHandler()
 	const userID = "gh-branch-user"
-	storeGithubToken(t, userID, "gh-access-token")
+	storeGithubToken(t, mockTokens, userID, "gh-access-token")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]map[string]string{
@@ -198,7 +214,7 @@ func TestHandleListBranches_GitHub(t *testing.T) {
 		map[string]string{"provider": "github", "owner": "alice", "repo": "myrepo"},
 	)
 	w := httptest.NewRecorder()
-	HandleListBranches(w, req)
+	h.HandleListBranches(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -223,8 +239,9 @@ func TestHandleListBranches_GitHub(t *testing.T) {
 func TestHandleListBranches_GitLab(t *testing.T) {
 	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
 
+	h, mockTokens := newTestReposHandler()
 	const userID = "gl-branch-user"
-	storeGitlabToken(t, userID, "gl-access-token")
+	storeGitlabToken(t, mockTokens, userID, "gl-access-token")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Next-Page", "2")
@@ -244,7 +261,7 @@ func TestHandleListBranches_GitLab(t *testing.T) {
 		map[string]string{"provider": "gitlab", "owner": "bob", "repo": "myproject"},
 	)
 	w := httptest.NewRecorder()
-	HandleListBranches(w, req)
+	h.HandleListBranches(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -261,7 +278,6 @@ func TestHandleListBranches_GitLab(t *testing.T) {
 	if fmt.Sprintf("%v", body.Branches) != fmt.Sprintf("%v", want) {
 		t.Errorf("branches = %v, want %v", body.Branches, want)
 	}
-	// pagination: mock returned X-Next-Page: 2
 	if body.NextPage != 2 {
 		t.Errorf("expected nextPage 2, got %d", body.NextPage)
 	}

@@ -1,4 +1,4 @@
-import { EdgeProps, getBezierPath } from '@xyflow/react';
+import { BaseEdge, EdgeProps, getBezierPath } from '@xyflow/react';
 
 function MyCustomEdge({
   sourceX, sourceY, targetX, targetY,
@@ -17,5 +17,20 @@ function MyCustomEdge({
   );
 }
 
-const edgeTypes = { myEdge: MyCustomEdge };
+function ContainsEdge({
+  sourceX, sourceY, targetX, targetY,
+  sourcePosition, targetPosition, markerEnd
+}: EdgeProps) {
+  const [edgePath] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
+
+  return (
+    <BaseEdge
+      path={edgePath}
+      markerEnd={markerEnd}
+      style={{ stroke: '#4b5563', strokeWidth: 1 }}
+    />
+  );
+}
+
+const edgeTypes = { myEdge: MyCustomEdge, containsEdge: ContainsEdge };
 export {edgeTypes}

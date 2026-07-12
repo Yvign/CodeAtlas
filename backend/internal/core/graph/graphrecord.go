@@ -14,7 +14,6 @@ type NodeRecord struct {
 	SHA         string   `json:"sha"`
 	Path        string   `json:"path"`
 	Description string   `json:"description"`
-	Note        string   `json:"note"`
 	Pos         Position `json:"pos"`
 }
 

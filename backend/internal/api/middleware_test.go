@@ -33,7 +33,7 @@ var echoUserID = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(id))
 })
 
-func TestJWTMiddleware_MissingHeader(t *testing.T) {
+func TestJWTMiddleware_MissingCookie(t *testing.T) {
 	t.Setenv("CODEATLAS_JWT_SECRET", testJWTSecret)
 
 	req := httptest.NewRequest(http.MethodGet, "/repos", nil)
@@ -46,21 +46,7 @@ func TestJWTMiddleware_MissingHeader(t *testing.T) {
 	}
 }
 
-func TestJWTMiddleware_MalformedHeader(t *testing.T) {
-	t.Setenv("CODEATLAS_JWT_SECRET", testJWTSecret)
-
-	req := httptest.NewRequest(http.MethodGet, "/repos", nil)
-	req.Header.Set("Authorization", "Token somethingelse")
-	w := httptest.NewRecorder()
-
-	JWTMiddleware(echoUserID).ServeHTTP(w, req)
-
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401, got %d", w.Code)
-	}
-}
-
-func TestJWTMiddleware_TamperedToken(t *testing.T) {
+func TestJWTMiddleware_TamperedCookie(t *testing.T) {
 	t.Setenv("CODEATLAS_JWT_SECRET", testJWTSecret)
 
 	valid := makeToken(t, jwt.MapClaims{
@@ -71,7 +57,7 @@ func TestJWTMiddleware_TamperedToken(t *testing.T) {
 	tampered := valid[:len(valid)-4] + "XXXX"
 
 	req := httptest.NewRequest(http.MethodGet, "/repos", nil)
-	req.Header.Set("Authorization", "Bearer "+tampered)
+	req.AddCookie(&http.Cookie{Name: "codeatlas_jwt", Value: tampered})
 	w := httptest.NewRecorder()
 
 	JWTMiddleware(echoUserID).ServeHTTP(w, req)
@@ -81,7 +67,7 @@ func TestJWTMiddleware_TamperedToken(t *testing.T) {
 	}
 }
 
-func TestJWTMiddleware_ExpiredToken(t *testing.T) {
+func TestJWTMiddleware_ExpiredCookie(t *testing.T) {
 	t.Setenv("CODEATLAS_JWT_SECRET", testJWTSecret)
 
 	expired := makeToken(t, jwt.MapClaims{
@@ -91,7 +77,7 @@ func TestJWTMiddleware_ExpiredToken(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/repos", nil)
-	req.Header.Set("Authorization", "Bearer "+expired)
+	req.AddCookie(&http.Cookie{Name: "codeatlas_jwt", Value: expired})
 	w := httptest.NewRecorder()
 
 	JWTMiddleware(echoUserID).ServeHTTP(w, req)
@@ -101,7 +87,7 @@ func TestJWTMiddleware_ExpiredToken(t *testing.T) {
 	}
 }
 
-func TestJWTMiddleware_ValidToken(t *testing.T) {
+func TestJWTMiddleware_ValidCookie(t *testing.T) {
 	t.Setenv("CODEATLAS_JWT_SECRET", testJWTSecret)
 
 	const wantUserID = "user-abc-123"
@@ -112,7 +98,7 @@ func TestJWTMiddleware_ValidToken(t *testing.T) {
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/repos", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.AddCookie(&http.Cookie{Name: "codeatlas_jwt", Value: token})
 	w := httptest.NewRecorder()
 
 	JWTMiddleware(echoUserID).ServeHTTP(w, req)

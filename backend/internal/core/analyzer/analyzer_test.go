@@ -148,6 +148,24 @@ func TestAnalyze_NodeCreatedForEveryFile(t *testing.T) {
 	}
 }
 
+func TestAnalyze_NodeType_DirectoryForTreeFileForBlob(t *testing.T) {
+	files := []fetcher.FileData{
+		{Path: "src", Type: "tree", SHA: "sha1"},
+		{Path: "src/app.ts", Type: "blob", SHA: "sha2"},
+	}
+	result := Analyze(files)
+
+	dir := nodeByPath(t, result.Nodes, "src")
+	if dir.Type != "directory" {
+		t.Errorf("tree node Type: got %q, want %q", dir.Type, "directory")
+	}
+
+	file := nodeByPath(t, result.Nodes, "src/app.ts")
+	if file.Type != "file" {
+		t.Errorf("blob node Type: got %q, want %q", file.Type, "file")
+	}
+}
+
 func TestAnalyze_NodeFields(t *testing.T) {
 	files := []fetcher.FileData{
 		{Path: "src/app.ts", Type: "blob", SHA: "abc123"},
@@ -166,6 +184,23 @@ func TestAnalyze_NodeFields(t *testing.T) {
 	if n.Type != "file" {
 		t.Errorf("Type: got %q, want %q", n.Type, "file")
 	}
+	if n.Path != "src/app.ts" {
+		t.Errorf("Path: got %q, want %q", n.Path, "src/app.ts")
+	}
+}
+
+func TestAnalyze_AllNodesHaveNonEmptyPath(t *testing.T) {
+	files := []fetcher.FileData{
+		{Path: "src", Type: "tree", SHA: "sha1"},
+		{Path: "src/app.ts", Type: "blob", SHA: "sha2"},
+		{Path: "README.md", Type: "blob", SHA: "sha3"},
+	}
+	result := Analyze(files)
+	for _, n := range result.Nodes {
+		if n.Path == "" {
+			t.Errorf("node %q has empty Path", n.Name)
+		}
+	}
 }
 
 func TestAnalyze_EdgeResolvedImport(t *testing.T) {
@@ -177,12 +212,20 @@ func TestAnalyze_EdgeResolvedImport(t *testing.T) {
 	if len(result.Edges) != 1 {
 		t.Fatalf("expected 1 edge, got %d: %v", len(result.Edges), result.Edges)
 	}
+
+	source := nodeByPath(t, result.Nodes, "src/app.ts")
+	target := nodeByPath(t, result.Nodes, "src/utils.ts")
+
 	e := result.Edges[0]
-	if e.Source != "src/app.ts" {
-		t.Errorf("Source: got %q", e.Source)
+	// Dependency edges must reference node UUIDs, not paths.
+	if e.Source == "src/app.ts" || e.Target == "src/utils.ts" {
+		t.Errorf("dependency edge uses paths instead of UUIDs: %+v", e)
 	}
-	if e.Target != "src/utils.ts" {
-		t.Errorf("Target: got %q", e.Target)
+	if e.Source != source.UUID {
+		t.Errorf("Source: got %q, want %q", e.Source, source.UUID)
+	}
+	if e.Target != target.UUID {
+		t.Errorf("Target: got %q, want %q", e.Target, target.UUID)
 	}
 }
 
@@ -247,8 +290,12 @@ func TestAnalyze_DependencyEdgeType(t *testing.T) {
 		{Path: "src/utils.ts", Type: "blob", SHA: "sha2"},
 	}
 	result := Analyze(files)
+
+	source := nodeByPath(t, result.Nodes, "src/app.ts")
+	target := nodeByPath(t, result.Nodes, "src/utils.ts")
+
 	for _, e := range result.Edges {
-		if e.Source == "src/app.ts" && e.Target == "src/utils.ts" {
+		if e.Source == source.UUID && e.Target == target.UUID {
 			if e.Type != graph.EdgeTypeDependency {
 				t.Errorf("dependency edge type: got %q, want %q", e.Type, graph.EdgeTypeDependency)
 			}
@@ -258,21 +305,41 @@ func TestAnalyze_DependencyEdgeType(t *testing.T) {
 	t.Fatal("dependency edge not found")
 }
 
+// nodeByPath returns the node with the given path, failing the test if absent.
+func nodeByPath(t *testing.T, nodes []Node, p string) Node {
+	t.Helper()
+	for _, n := range nodes {
+		if n.Path == p {
+			return n
+		}
+	}
+	t.Fatalf("no node found for path %q", p)
+	return Node{}
+}
+
 func TestAnalyze_ContainsEdgeEmittedForFileInDir(t *testing.T) {
 	files := []fetcher.FileData{
 		{Path: "src", Type: "tree", SHA: "sha1"},
 		{Path: "src/app.ts", Type: "blob", SHA: "sha2"},
 	}
 	result := Analyze(files)
+
+	parent := nodeByPath(t, result.Nodes, "src")
+	child := nodeByPath(t, result.Nodes, "src/app.ts")
+
 	for _, e := range result.Edges {
-		if e.Source == "src" && e.Target == "src/app.ts" {
-			if e.Type != graph.EdgeTypeContains {
-				t.Errorf("contains edge type: got %q, want %q", e.Type, graph.EdgeTypeContains)
-			}
+		if e.Type != graph.EdgeTypeContains {
+			continue
+		}
+		// Contains edges must reference node UUIDs, not paths.
+		if e.Source == "src" || e.Target == "src/app.ts" {
+			t.Errorf("contains edge uses paths instead of UUIDs: %+v", e)
+		}
+		if e.Source == parent.UUID && e.Target == child.UUID {
 			return
 		}
 	}
-	t.Fatal("contains edge src→src/app.ts not found")
+	t.Fatal("contains edge parent.UUID→child.UUID not found")
 }
 
 func TestAnalyze_ContainsEdgeNotEmittedForRootLevelFile(t *testing.T) {
@@ -307,16 +374,24 @@ func TestAnalyze_ContainsEdgesForMultipleChildren(t *testing.T) {
 		{Path: "src/b.ts", Type: "blob", SHA: "sha3"},
 	}
 	result := Analyze(files)
+
+	parent := nodeByPath(t, result.Nodes, "src")
+	childA := nodeByPath(t, result.Nodes, "src/a.ts")
+	childB := nodeByPath(t, result.Nodes, "src/b.ts")
+
 	found := map[string]bool{}
 	for _, e := range result.Edges {
 		if e.Type == graph.EdgeTypeContains {
+			if e.Source != parent.UUID {
+				t.Errorf("contains edge source: got %q, want parent UUID %q", e.Source, parent.UUID)
+			}
 			found[e.Target] = true
 		}
 	}
-	if !found["src/a.ts"] {
+	if !found[childA.UUID] {
 		t.Error("missing contains edge for src/a.ts")
 	}
-	if !found["src/b.ts"] {
+	if !found[childB.UUID] {
 		t.Error("missing contains edge for src/b.ts")
 	}
 }
@@ -333,5 +408,82 @@ func TestAnalyze_MultipleEdgesFromOneFile(t *testing.T) {
 	result := Analyze(files)
 	if len(result.Edges) != 2 {
 		t.Fatalf("expected 2 edges, got %d: %v", len(result.Edges), result.Edges)
+	}
+}
+
+func TestAnalyze_DuplicateImportsCollapseToSingleEdge(t *testing.T) {
+	// Two separate import statements resolving to the same target file
+	// must collapse into a single dependency edge.
+	files := []fetcher.FileData{
+		{
+			Path: "src/app.ts", Type: "blob", SHA: "sha1",
+			RawFileData: "import { a } from './utils'\nimport { b } from './utils'",
+		},
+		{Path: "src/utils.ts", Type: "blob", SHA: "sha2"},
+	}
+	result := Analyze(files)
+
+	source := nodeByPath(t, result.Nodes, "src/app.ts")
+	target := nodeByPath(t, result.Nodes, "src/utils.ts")
+
+	count := 0
+	for _, e := range result.Edges {
+		if e.Type == graph.EdgeTypeDependency && e.Source == source.UUID && e.Target == target.UUID {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("expected exactly 1 deduplicated dependency edge, got %d", count)
+	}
+}
+
+func TestAnalyze_AllEdgesUseUUIDsNotPaths(t *testing.T) {
+	files := []fetcher.FileData{
+		{Path: "src", Type: "tree", SHA: "sha1"},
+		{Path: "src/app.ts", Type: "blob", SHA: "sha2", RawFileData: `import foo from './utils'`},
+		{Path: "src/utils.ts", Type: "blob", SHA: "sha3"},
+	}
+	result := Analyze(files)
+
+	paths := make(map[string]bool, len(files))
+	uuids := make(map[string]bool, len(result.Nodes))
+	for _, f := range files {
+		paths[f.Path] = true
+	}
+	for _, n := range result.Nodes {
+		uuids[n.UUID] = true
+	}
+
+	if len(result.Edges) == 0 {
+		t.Fatal("expected at least one edge for this fixture")
+	}
+	for _, e := range result.Edges {
+		if paths[e.Source] || paths[e.Target] {
+			t.Errorf("edge uses a raw path instead of a UUID: %+v", e)
+		}
+		if !uuids[e.Source] || !uuids[e.Target] {
+			t.Errorf("edge Source/Target does not match any node UUID: %+v", e)
+		}
+	}
+}
+
+func TestAnalyze_NoDuplicateEdgesOverall(t *testing.T) {
+	files := []fetcher.FileData{
+		{Path: "src", Type: "tree", SHA: "sha1"},
+		{
+			Path: "src/app.ts", Type: "blob", SHA: "sha2",
+			RawFileData: "import { a } from './utils'\nimport { b } from './utils'",
+		},
+		{Path: "src/utils.ts", Type: "blob", SHA: "sha3"},
+	}
+	result := Analyze(files)
+
+	seen := make(map[[2]string]bool)
+	for _, e := range result.Edges {
+		key := [2]string{e.Source, e.Target}
+		if seen[key] {
+			t.Errorf("duplicate edge found: %+v", e)
+		}
+		seen[key] = true
 	}
 }

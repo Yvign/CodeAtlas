@@ -20,46 +20,46 @@ type config struct {
 
 func Load() (*config, error) {
 	cf := &config{}
-	cf.DatabaseUrl = os.Getenv("CodeAtlas_DB_URL");
+	cf.DatabaseUrl = os.Getenv("CODEATLAS_DB_URL");
 	if cf.DatabaseUrl == "" {
-		return nil,fmt.Errorf("CodeAtlas_DB_URL is not set")
+		return nil,fmt.Errorf("CODEATLAS_DB_URL is not set")
 	}
-	cf.Jwtsecret = os.Getenv("CodeAtlas_JWT_secret");
+	cf.Jwtsecret = os.Getenv("CODEATLAS_JWT_SECRET");
 	if cf.Jwtsecret == "" {
-		return nil,fmt.Errorf("CodeAtlas_JWT_secret is not set")
+		return nil,fmt.Errorf("CODEATLAS_JWT_SECRET is not set")
 	}
-	cf.encryptionkey = os.Getenv("CodeAtlas_encryption_key");
+	cf.encryptionkey = os.Getenv("CODEATLAS_ENCRYPTION_KEY");
 	if cf.encryptionkey == "" {
-		return nil,fmt.Errorf("CodeAtlas_encryption_key is not set")
+		return nil,fmt.Errorf("CODEATLAS_ENCRYPTION_KEY is not set")
 	}
-	cf.GithubClientId = os.Getenv("CodeAtlas_Github_client_id");
+	cf.GithubClientId = os.Getenv("CODEATLAS_GITHUB_CLIENT_ID");
 	if cf.GithubClientId == "" {
-		return nil,fmt.Errorf("CodeAtlas_Github_client_id is not set")
+		return nil,fmt.Errorf("CODEATLAS_GITHUB_CLIENT_ID is not set")
 	}
-	cf.GithubClientSecret = os.Getenv("CodeAtlas_Github_client_secret");
+	cf.GithubClientSecret = os.Getenv("CODEATLAS_GITHUB_CLIENT_SECRET");
 	if cf.GithubClientSecret == "" {
-		return nil,fmt.Errorf("CodeAtlas_Github_client_secret is not set")
+		return nil,fmt.Errorf("CODEATLAS_GITHUB_CLIENT_SECRET is not set")
 	}
-	cf.GitlabClientId = os.Getenv("CodeAtlas_Gitlab_client_id");
+	cf.GitlabClientId = os.Getenv("CODEATLAS_GITLAB_CLIENT_ID");
 	if cf.GitlabClientId == "" {
-		return nil,fmt.Errorf("CodeAtlas_Gitlab_client_id is not set")
+		return nil,fmt.Errorf("CODEATLAS_GITLAB_CLIENT_ID is not set")
 	}
-	cf.GitlabClientSecret = os.Getenv("CodeAtlas_Gitlab_client_secret");
+	cf.GitlabClientSecret = os.Getenv("CODEATLAS_GITLAB_CLIENT_SECRET");
 	if cf.GitlabClientSecret == "" {
-		return nil,fmt.Errorf("CodeAtlas_Gitlab_client_secret is not set")
+		return nil,fmt.Errorf("CODEATLAS_GITLAB_CLIENT_SECRET is not set")
 	}
-	cf.AppbaseUrl = os.Getenv("CodeAtlas_App_base_url");
+	cf.AppbaseUrl = os.Getenv("CODEATLAS_APP_BASE_URL");
 	if cf.AppbaseUrl == "" {
-		return nil,fmt.Errorf("CodeAtlas_App_base_url is not set")
+		return nil,fmt.Errorf("CODEATLAS_APP_BASE_URL is not set")
 	}
-	portStr := os.Getenv("CodeAtlas_port");
+	portStr := os.Getenv("CODEATLAS_PORT");
 	if portStr == "" {
-		return nil,fmt.Errorf("CodeAtlas_port is not set")
+		return nil,fmt.Errorf("CODEATLAS_PORT is not set")
 	}
 	var err error
 	cf.Port,err = strconv.Atoi(portStr)
 	if err != nil {
-		return nil,fmt.Errorf("CodeAtlas_port is not a valid integer")
+		return nil,fmt.Errorf("CODEATLAS_PORT is not a valid integer")
 	}
 
 	return cf,nil

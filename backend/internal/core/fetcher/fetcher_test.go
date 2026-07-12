@@ -109,11 +109,48 @@ func TestFetchFileTree_ExtensionFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(files) != 1 {
-		t.Fatalf("expected 1 file (only .ts), got %d", len(files))
+	// All files become nodes, regardless of extension.
+	if len(files) != 4 {
+		t.Fatalf("expected 4 files, got %d", len(files))
 	}
-	if files[0].Path != "index.ts" {
-		t.Errorf("expected index.ts, got %q", files[0].Path)
+
+	byPath := make(map[string]FileData)
+	for _, f := range files {
+		byPath[f.Path] = f
+	}
+
+	// Only the .ts file's content is fetched — it's the only parseable extension.
+	if byPath["index.ts"].RawFileData != "export const x = 1" {
+		t.Errorf("expected content for index.ts, got %q", byPath["index.ts"].RawFileData)
+	}
+	for _, path := range []string{"config.json", "style.css", "README.md"} {
+		if byPath[path].RawFileData != "" {
+			t.Errorf("expected no fetched content for %s, got %q", path, byPath[path].RawFileData)
+		}
+	}
+}
+
+func TestFetchFileTree_ExtensionFilterIsCaseInsensitive(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/owner/repo/git/trees/main", makeTreeHandler(ResponseTree{
+		Tree: []SubTree{
+			{Path: "Component.TSX", Type: "blob", SHA: "sha1"},
+		},
+	}))
+	mux.HandleFunc("/repos/owner/repo/git/blobs/sha1", makeBlobHandler("export const x = 1"))
+
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	files, _, err := FetchfileTree(&GithubProvider{BaseUrl: srv.URL}, "owner", "repo", "main", "token")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 file, got %d", len(files))
+	}
+	if files[0].RawFileData != "export const x = 1" {
+		t.Errorf("expected content fetched for uppercase .TSX extension, got %q", files[0].RawFileData)
 	}
 }
 

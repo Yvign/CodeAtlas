@@ -100,8 +100,29 @@ func Merge(newGraph GraphStructure, existingGraph GraphStructure) GraphStructure
 		}
 	}
 
+	// Step 5 — remap edges from each fresh node's provisional UUID (assigned
+	// per-run by the analyzer) to its final merged UUID, so edges built from
+	// those provisional UUIDs stay valid once node identities are reconciled.
+	oldToFinal := make(map[string]string, len(newGraph.Nodes))
+	for i, fn := range newGraph.Nodes {
+		if fn.UUID == "" {
+			continue
+		}
+		oldToFinal[fn.UUID] = merged[i].UUID
+	}
+	mergedEdges := make([]Edge, len(newGraph.Edges))
+	for i, e := range newGraph.Edges {
+		mergedEdges[i] = e
+		if final, ok := oldToFinal[e.Source]; ok {
+			mergedEdges[i].Source = final
+		}
+		if final, ok := oldToFinal[e.Target]; ok {
+			mergedEdges[i].Target = final
+		}
+	}
+
 	return GraphStructure{
 		Nodes: merged,
-		Edges: newGraph.Edges,
+		Edges: mergedEdges,
 	}
 }

@@ -5,24 +5,30 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"CodeAtlas/internal/core/graph"
+	"CodeAtlas/internal/db"
 	"CodeAtlas/internal/worker"
 )
 
 // ── test helpers ──────────────────────────────────────────────────────────────
 
+// newTestGraphsHandler creates a GraphsHandler with fresh mock repos.
+func newTestGraphsHandler() (*GraphsHandler, *db.MockGraphRepository, *db.MockTokenRepository) {
+	mockGraphs := db.NewMockGraphRepository()
+	mockTokens := db.NewMockTokenRepository()
+	return &GraphsHandler{Graphs: mockGraphs, Tokens: mockTokens}, mockGraphs, mockTokens
+}
+
 func graphJSONBody(provider, owner, repo, branch string) *bytes.Reader {
-	b, _ := json.Marshal(createGraphBody{
+	b, _ := json.Marshal(createGraphRequest{
 		Provider: provider, Owner: owner, Repo: repo, Branch: branch,
 	})
 	return bytes.NewReader(b)
@@ -58,36 +64,41 @@ func overrideSpawnWorker(t *testing.T) {
 	t.Cleanup(func() { spawnWorker = orig })
 }
 
-// cleanupUser removes all sync.Map entries created for a userID.
-func cleanupUser(userID string) {
-	graphsByID.Range(func(k, v any) bool {
-		if v.(*GraphRegistryEntry).UserID == userID {
-			graphsByID.Delete(k)
-		}
-		return true
-	})
-	graphsByRepo.Range(func(k, v any) bool {
-		if strings.HasPrefix(k.(string), userID+":") {
-			graphsByRepo.Delete(k)
-		}
-		return true
-	})
+// captureSpawnWorker replaces spawnWorker with a function that records the
+// worker passed to it (without running it) and returns a getter for it.
+func captureSpawnWorker(t *testing.T) func() *worker.Worker {
+	t.Helper()
+	var captured *worker.Worker
+	orig := spawnWorker
+	spawnWorker = func(w *worker.Worker) { captured = w }
+	t.Cleanup(func() { spawnWorker = orig })
+	return func() *worker.Worker { return captured }
 }
 
-// uniqueUser generates a unique test userID and schedules cleanup.
-func uniqueUser(t *testing.T) string {
+// postGraphReqWithCommit builds a create-graph POST request with an explicit commit flag.
+func postGraphReqWithCommit(userID, provider, owner, repo, branch string, commit bool) *http.Request {
+	b, _ := json.Marshal(createGraphRequest{
+		Provider: provider, Owner: owner, Repo: repo, Branch: branch, Commit: &commit,
+	})
+	req := httptest.NewRequest(http.MethodPost, "/graphs", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	ctx := context.WithValue(req.Context(), userIDKey, userID)
+	return req.WithContext(ctx)
+}
+
+// uniqueUser creates a unique userID and stores an encrypted github token in tokens.
+func uniqueUser(t *testing.T, tokens *db.MockTokenRepository) string {
 	t.Helper()
 	id := "test-" + uuid.New().String()
-	storeGithubToken(t, id, "gh-access-token")
-	t.Cleanup(func() { cleanupUser(id) })
+	storeGithubToken(t, tokens, id, "gh-access-token")
 	return id
 }
 
 // doCreate posts a create-graph request and returns the decoded body.
-func doCreate(t *testing.T, userID, provider, owner, repo, branch string) (code int, graphID string) {
+func doCreate(t *testing.T, h *GraphsHandler, userID, provider, owner, repo, branch string) (code int, graphID string) {
 	t.Helper()
 	w := httptest.NewRecorder()
-	HandleCreateGraph(w, postGraphReq(userID, provider, owner, repo, branch))
+	h.HandleCreateGraph(w, postGraphReq(userID, provider, owner, repo, branch))
 	var body struct {
 		GraphID string `json:"graphId"`
 	}
@@ -95,14 +106,32 @@ func doCreate(t *testing.T, userID, provider, owner, repo, branch string) (code 
 	return w.Code, body.GraphID
 }
 
+// registerReadyEntry stores a "ready" graph entry in the mock repo and returns its ID.
+func registerReadyEntry(t *testing.T, graphs *db.MockGraphRepository, userID, provider, owner, repo, branch string) string {
+	t.Helper()
+	rec, err := graphs.FindOrCreate(context.Background(), db.GraphRecord{
+		UserID:   userID,
+		Provider: provider,
+		Owner:    owner,
+		RepoName: repo,
+		Branch:   branch,
+	})
+	if err != nil {
+		t.Fatalf("registerReadyEntry: %v", err)
+	}
+	graphs.UpdateStatus(context.Background(), rec.ID, "ready", "")
+	return rec.ID
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 func TestCreateGraph_Valid(t *testing.T) {
 	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
 	overrideSpawnWorker(t)
-	userID := uniqueUser(t)
+	h, mockGraphs, mockTokens := newTestGraphsHandler()
+	userID := uniqueUser(t, mockTokens)
 
-	code, graphID := doCreate(t, userID, "github", "alice", "myrepo", "main")
+	code, graphID := doCreate(t, h, userID, "github", "alice", "myrepo", "main")
 
 	if code != http.StatusAccepted {
 		t.Fatalf("expected 202, got %d", code)
@@ -111,19 +140,20 @@ func TestCreateGraph_Valid(t *testing.T) {
 		t.Fatal("expected non-empty graphId")
 	}
 
-	// Entry should be in the store
-	if _, ok := graphsByID.Load(graphID); !ok {
-		t.Errorf("graphsByID missing entry for %s", graphID)
+	rec, _ := mockGraphs.FindByID(context.Background(), graphID)
+	if rec == nil {
+		t.Errorf("mock graph repo missing entry for %s", graphID)
 	}
 }
 
 func TestCreateGraph_Dedup(t *testing.T) {
 	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
 	overrideSpawnWorker(t)
-	userID := uniqueUser(t)
+	h, _, mockTokens := newTestGraphsHandler()
+	userID := uniqueUser(t, mockTokens)
 
-	code1, id1 := doCreate(t, userID, "github", "alice", "myrepo", "main")
-	code2, id2 := doCreate(t, userID, "github", "alice", "myrepo", "main")
+	code1, id1 := doCreate(t, h, userID, "github", "alice", "myrepo", "main")
+	code2, id2 := doCreate(t, h, userID, "github", "alice", "myrepo", "main")
 
 	if code1 != http.StatusAccepted || code2 != http.StatusAccepted {
 		t.Fatalf("expected 202/202, got %d/%d", code1, code2)
@@ -133,15 +163,88 @@ func TestCreateGraph_Dedup(t *testing.T) {
 	}
 }
 
+func TestCreateGraph_CommitOmitted_DefaultsToTrue(t *testing.T) {
+	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
+	getWorker := captureSpawnWorker(t)
+	h, _, mockTokens := newTestGraphsHandler()
+	userID := uniqueUser(t, mockTokens)
+
+	doCreate(t, h, userID, "github", "alice", "myrepo", "main")
+
+	wk := getWorker()
+	if wk == nil {
+		t.Fatal("expected spawnWorker to be called")
+	}
+	if !wk.CommitEnabled {
+		t.Error("expected CommitEnabled to default to true when commit is omitted")
+	}
+}
+
+func TestCreateGraph_CommitFalse_DisablesCommit(t *testing.T) {
+	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
+	getWorker := captureSpawnWorker(t)
+	h, _, mockTokens := newTestGraphsHandler()
+	userID := uniqueUser(t, mockTokens)
+
+	w := httptest.NewRecorder()
+	h.HandleCreateGraph(w, postGraphReqWithCommit(userID, "github", "alice", "myrepo", "main", false))
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", w.Code)
+	}
+
+	wk := getWorker()
+	if wk == nil {
+		t.Fatal("expected spawnWorker to be called")
+	}
+	if wk.CommitEnabled {
+		t.Error("expected CommitEnabled to be false when commit:false is sent")
+	}
+}
+
+func TestGetGraph_ServesFromMemoryWhenCommitDisabled(t *testing.T) {
+	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
+	h, mockGraphs, mockTokens := newTestGraphsHandler()
+	userID := uniqueUser(t, mockTokens)
+	graphID := registerReadyEntry(t, mockGraphs, userID, "github", "alice", "myrepo", "main")
+
+	rec := sampleWriteGraph()
+	inMemoryGraphs.Store(graphID, rec)
+	t.Cleanup(func() { inMemoryGraphs.Delete(graphID) })
+
+	// No provider mock server is set up: if the handler tried to fetch from
+	// the provider instead of serving the in-memory record, this would fail.
+	w := httptest.NewRecorder()
+	h.HandleGetGraph(w, graphIDReq(http.MethodGet, userID, graphID))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var body struct {
+		Status string            `json:"status"`
+		Graph  graph.GraphRecord `json:"graph"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Status != "ready" {
+		t.Errorf("status: got %q, want %q", body.Status, "ready")
+	}
+	if len(body.Graph.Nodes) != len(rec.Nodes) {
+		t.Errorf("expected %d nodes from in-memory record, got %d", len(rec.Nodes), len(body.Graph.Nodes))
+	}
+}
+
 func TestGetGraph_Processing(t *testing.T) {
 	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
 	overrideSpawnWorker(t)
-	userID := uniqueUser(t)
+	h, _, mockTokens := newTestGraphsHandler()
+	userID := uniqueUser(t, mockTokens)
 
-	_, graphID := doCreate(t, userID, "github", "alice", "myrepo", "main")
+	_, graphID := doCreate(t, h, userID, "github", "alice", "myrepo", "main")
 
 	w := httptest.NewRecorder()
-	HandleGetGraph(w, graphIDReq(http.MethodGet, userID, graphID))
+	h.HandleGetGraph(w, graphIDReq(http.MethodGet, userID, graphID))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -156,14 +259,14 @@ func TestGetGraph_Processing(t *testing.T) {
 func TestGetGraph_Forbidden(t *testing.T) {
 	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
 	overrideSpawnWorker(t)
-	ownerID := uniqueUser(t)
+	h, _, mockTokens := newTestGraphsHandler()
+	ownerID := uniqueUser(t, mockTokens)
 
-	_, graphID := doCreate(t, ownerID, "github", "alice", "myrepo", "main")
+	_, graphID := doCreate(t, h, ownerID, "github", "alice", "myrepo", "main")
 
-	// Different user tries to access the graph
 	otherID := "other-" + uuid.New().String()
 	w := httptest.NewRecorder()
-	HandleGetGraph(w, graphIDReq(http.MethodGet, otherID, graphID))
+	h.HandleGetGraph(w, graphIDReq(http.MethodGet, otherID, graphID))
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d", w.Code)
@@ -171,9 +274,10 @@ func TestGetGraph_Forbidden(t *testing.T) {
 }
 
 func TestGetGraph_NotFound(t *testing.T) {
+	h, _, _ := newTestGraphsHandler()
 	userID := "nf-" + uuid.New().String()
 	w := httptest.NewRecorder()
-	HandleGetGraph(w, graphIDReq(http.MethodGet, userID, "nonexistent-id"))
+	h.HandleGetGraph(w, graphIDReq(http.MethodGet, userID, "nonexistent-id"))
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", w.Code)
@@ -183,13 +287,14 @@ func TestGetGraph_NotFound(t *testing.T) {
 func TestDeleteGraph(t *testing.T) {
 	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
 	overrideSpawnWorker(t)
-	userID := uniqueUser(t)
+	h, _, mockTokens := newTestGraphsHandler()
+	userID := uniqueUser(t, mockTokens)
 
-	_, graphID := doCreate(t, userID, "github", "alice", "myrepo", "main")
+	_, graphID := doCreate(t, h, userID, "github", "alice", "myrepo", "main")
 
 	// DELETE
 	dw := httptest.NewRecorder()
-	HandleDeleteGraph(dw, graphIDReq(http.MethodDelete, userID, graphID))
+	h.HandleDeleteGraph(dw, graphIDReq(http.MethodDelete, userID, graphID))
 
 	if dw.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d", dw.Code)
@@ -197,7 +302,7 @@ func TestDeleteGraph(t *testing.T) {
 
 	// Subsequent GET should return 404
 	gw := httptest.NewRecorder()
-	HandleGetGraph(gw, graphIDReq(http.MethodGet, userID, graphID))
+	h.HandleGetGraph(gw, graphIDReq(http.MethodGet, userID, graphID))
 
 	if gw.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 after delete, got %d", gw.Code)
@@ -207,15 +312,16 @@ func TestDeleteGraph(t *testing.T) {
 func TestListGraphs_UserIsolation(t *testing.T) {
 	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
 	overrideSpawnWorker(t)
+	h, _, mockTokens := newTestGraphsHandler()
 
-	userA := uniqueUser(t)
-	userB := uniqueUser(t)
+	userA := uniqueUser(t, mockTokens)
+	userB := uniqueUser(t, mockTokens)
 
-	doCreate(t, userA, "github", "alice", "repo-a", "main")
-	doCreate(t, userB, "github", "bob", "repo-b", "main")
+	doCreate(t, h, userA, "github", "alice", "repo-a", "main")
+	doCreate(t, h, userB, "github", "bob", "repo-b", "main")
 
 	w := httptest.NewRecorder()
-	HandleListGraphs(w, listGraphsReq(userA))
+	h.HandleListGraphs(w, listGraphsReq(userA))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -258,26 +364,6 @@ func overrideHTTPClient(t *testing.T, srvURL string) {
 	t.Cleanup(func() { http.DefaultClient = old })
 }
 
-// registerReadyEntry stores a ready entry in graphsByID and schedules cleanup.
-func registerReadyEntry(t *testing.T, userID, provider, owner, repo, branch string) string {
-	t.Helper()
-	id := uuid.New().String()
-	entry := &GraphRegistryEntry{
-		ID:       id,
-		UserID:   userID,
-		Provider: provider,
-		Owner:    owner,
-		Repo:     repo,
-		Branch:   branch,
-		Status:   "ready",
-		CreatedAt: time.Now(),
-		LastOpenedAt: time.Now(),
-	}
-	graphsByID.Store(id, entry)
-	t.Cleanup(func() { graphsByID.Delete(id) })
-	return id
-}
-
 // encodedGraph base64-encodes a GraphRecord as JSON, matching the GitHub
 // contents-API "content" field format.
 func encodedGraph(t *testing.T, rec graph.GraphRecord) string {
@@ -301,35 +387,13 @@ func githubPutResponse(newSHA string) []byte {
 	return b
 }
 
-// nodeReq builds a request with chi URL params set for {id} and {nodeId}.
-func nodeReq(method, userID, graphID, nodeID string, body any) *http.Request {
-	var r io.Reader
-	if body != nil {
-		b, _ := json.Marshal(body)
-		r = bytes.NewReader(b)
-	}
-	req := httptest.NewRequest(method, "/graphs/"+graphID+"/nodes/"+nodeID, r)
+// descriptionsReq builds a PATCH /graphs/{id}/nodes request (batched description updates).
+func descriptionsReq(userID, graphID string, body any) *http.Request {
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPatch, "/graphs/"+graphID+"/nodes", bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("id", graphID)
-	rctx.URLParams.Add("nodeId", nodeID)
-	ctx := context.WithValue(req.Context(), userIDKey, userID)
-	ctx = context.WithValue(ctx, chi.RouteCtxKey, rctx)
-	return req.WithContext(ctx)
-}
-
-// noteReq builds a request with chi URL params set for {id} and {noteId}.
-func noteReq(method, userID, graphID, noteID string, body any) *http.Request {
-	var r io.Reader
-	if body != nil {
-		b, _ := json.Marshal(body)
-		r = bytes.NewReader(b)
-	}
-	req := httptest.NewRequest(method, "/graphs/"+graphID+"/notes/"+noteID, r)
-	req.Header.Set("Content-Type", "application/json")
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("id", graphID)
-	rctx.URLParams.Add("noteId", noteID)
 	ctx := context.WithValue(req.Context(), userIDKey, userID)
 	ctx = context.WithValue(ctx, chi.RouteCtxKey, rctx)
 	return req.WithContext(ctx)
@@ -365,18 +429,79 @@ func sampleWriteGraph() graph.GraphRecord {
 
 // ── handler tests ─────────────────────────────────────────────────────────────
 
-func TestUpdateNodeDescription_UpdatesAndReturns200(t *testing.T) {
+func TestCommitGraph_CommitsInMemoryRecordAndReturns200(t *testing.T) {
 	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
-	userID := uniqueUser(t)
+	h, mockGraphs, mockTokens := newTestGraphsHandler()
+	userID := uniqueUser(t, mockTokens)
 	rec := sampleWriteGraph()
-	graphID := registerReadyEntry(t, userID, "github", "alice", "myrepo", "main")
+	graphID := registerReadyEntry(t, mockGraphs, userID, "github", "alice", "myrepo", "main")
 
+	inMemoryGraphs.Store(graphID, rec)
+	t.Cleanup(func() { inMemoryGraphs.Delete(graphID) })
+
+	var capturedMethod string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedMethod = r.Method
+		w.WriteHeader(http.StatusCreated)
+		w.Write(githubPutResponse("sha-first-commit"))
+	}))
+	defer srv.Close()
+	overrideHTTPClient(t, srv.URL)
+
+	w := httptest.NewRecorder()
+	h.HandleCommitGraph(w, graphIDReq(http.MethodPost, userID, graphID))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedMethod != http.MethodPut {
+		t.Errorf("expected a PUT to create the file, got %s", capturedMethod)
+	}
+	var resp map[string]string
+	json.NewDecoder(w.Body).Decode(&resp)
+	if resp["committedAt"] == "" {
+		t.Error("expected non-empty committedAt")
+	}
+	if _, stillPending := inMemoryGraphs.Load(graphID); stillPending {
+		t.Error("expected in-memory record to be cleared after commit")
+	}
+}
+
+func TestCommitGraph_NoPendingData_Returns409(t *testing.T) {
+	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
+	h, mockGraphs, mockTokens := newTestGraphsHandler()
+	userID := uniqueUser(t, mockTokens)
+	graphID := registerReadyEntry(t, mockGraphs, userID, "github", "alice", "myrepo", "main")
+
+	w := httptest.NewRecorder()
+	h.HandleCommitGraph(w, graphIDReq(http.MethodPost, userID, graphID))
+
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestUpdateNodeDescriptions_CommitsAllInOneCall(t *testing.T) {
+	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
+	h, mockGraphs, mockTokens := newTestGraphsHandler()
+	userID := uniqueUser(t, mockTokens)
+	rec := sampleWriteGraph()
+	graphID := registerReadyEntry(t, mockGraphs, userID, "github", "alice", "myrepo", "main")
+
+	putCount := 0
+	var capturedContent string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			w.WriteHeader(http.StatusOK)
 			w.Write(githubGetResponse("sha-init", encodedGraph(t, rec)))
 		case http.MethodPut:
+			putCount++
+			var body struct {
+				Content string `json:"content"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			capturedContent = body.Content
 			w.WriteHeader(http.StatusOK)
 			w.Write(githubPutResponse("sha-updated"))
 		}
@@ -384,116 +509,18 @@ func TestUpdateNodeDescription_UpdatesAndReturns200(t *testing.T) {
 	defer srv.Close()
 	overrideHTTPClient(t, srv.URL)
 
+	updates := []map[string]string{
+		{"nodeId": "node-1", "description": "entry point"},
+		{"nodeId": "node-2", "description": "helper functions"},
+	}
 	w := httptest.NewRecorder()
-	HandleUpdateNodeDescription(w, nodeReq(http.MethodPatch, userID, graphID, "node-1",
-		map[string]string{"description": "entry point"}))
+	h.HandleUpdateNodeDescriptions(w, descriptionsReq(userID, graphID, updates))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var resp map[string]string
-	json.NewDecoder(w.Body).Decode(&resp)
-	if resp["committedAt"] == "" {
-		t.Error("expected non-empty committedAt")
-	}
-}
-
-func TestAddNote_SetsNoteAndReturns201(t *testing.T) {
-	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
-	userID := uniqueUser(t)
-	rec := sampleWriteGraph()
-	graphID := registerReadyEntry(t, userID, "github", "alice", "myrepo", "main")
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			w.WriteHeader(http.StatusOK)
-			w.Write(githubGetResponse("sha-init", encodedGraph(t, rec)))
-		case http.MethodPut:
-			w.WriteHeader(http.StatusOK)
-			w.Write(githubPutResponse("sha-note"))
-		}
-	}))
-	defer srv.Close()
-	overrideHTTPClient(t, srv.URL)
-
-	w := httptest.NewRecorder()
-	HandleAddNote(w, nodeReq(http.MethodPost, userID, graphID, "node-2",
-		map[string]string{"content": "remember to refactor"}))
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-	var resp map[string]string
-	json.NewDecoder(w.Body).Decode(&resp)
-	if resp["committedAt"] == "" {
-		t.Error("expected non-empty committedAt")
-	}
-}
-
-func TestUpdateNote_UpdatesNoteContentAndReturns200(t *testing.T) {
-	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
-	userID := uniqueUser(t)
-	rec := sampleWriteGraph()
-	rec.Nodes[0].Note = "old note"
-	graphID := registerReadyEntry(t, userID, "github", "alice", "myrepo", "main")
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			w.WriteHeader(http.StatusOK)
-			w.Write(githubGetResponse("sha-init", encodedGraph(t, rec)))
-		case http.MethodPut:
-			w.WriteHeader(http.StatusOK)
-			w.Write(githubPutResponse("sha-updated-note"))
-		}
-	}))
-	defer srv.Close()
-	overrideHTTPClient(t, srv.URL)
-
-	w := httptest.NewRecorder()
-	HandleUpdateNote(w, noteReq(http.MethodPatch, userID, graphID, "node-1",
-		map[string]string{"content": "new note"}))
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
-	}
-	var resp map[string]string
-	json.NewDecoder(w.Body).Decode(&resp)
-	if resp["committedAt"] == "" {
-		t.Error("expected non-empty committedAt")
-	}
-}
-
-func TestDeleteNote_ClearsNoteAndReturns200(t *testing.T) {
-	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
-	userID := uniqueUser(t)
-	rec := sampleWriteGraph()
-	rec.Nodes[1].Note = "to be deleted"
-	graphID := registerReadyEntry(t, userID, "github", "alice", "myrepo", "main")
-
-	var putBody struct {
-		Content string `json:"content"`
-	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			w.WriteHeader(http.StatusOK)
-			w.Write(githubGetResponse("sha-init", encodedGraph(t, rec)))
-		case http.MethodPut:
-			json.NewDecoder(r.Body).Decode(&putBody)
-			w.WriteHeader(http.StatusOK)
-			w.Write(githubPutResponse("sha-del"))
-		}
-	}))
-	defer srv.Close()
-	overrideHTTPClient(t, srv.URL)
-
-	w := httptest.NewRecorder()
-	HandleDeleteNote(w, noteReq(http.MethodDelete, userID, graphID, "node-2", nil))
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	if putCount != 1 {
+		t.Errorf("expected exactly 1 PUT call, got %d", putCount)
 	}
 	var resp map[string]string
 	json.NewDecoder(w.Body).Decode(&resp)
@@ -501,25 +528,27 @@ func TestDeleteNote_ClearsNoteAndReturns200(t *testing.T) {
 		t.Error("expected non-empty committedAt")
 	}
 
-	// Verify the committed content has an empty note for node-2.
-	decoded, err := base64.StdEncoding.DecodeString(putBody.Content)
+	decoded, err := base64.StdEncoding.DecodeString(capturedContent)
 	if err != nil {
 		t.Fatalf("decode committed content: %v", err)
 	}
 	var committed graph.GraphRecord
 	json.Unmarshal(decoded, &committed)
+
+	want := map[string]string{"node-1": "entry point", "node-2": "helper functions"}
 	for _, n := range committed.Nodes {
-		if n.UUID == "node-2" && n.Note != "" {
-			t.Errorf("expected empty note for node-2, got %q", n.Note)
+		if desc, ok := want[n.UUID]; ok && n.Description != desc {
+			t.Errorf("node %s: description = %q, want %q", n.UUID, n.Description, desc)
 		}
 	}
 }
 
 func TestUpdateLayout_CommitsAllThreePositionsInOneCall(t *testing.T) {
 	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
-	userID := uniqueUser(t)
+	h, mockGraphs, mockTokens := newTestGraphsHandler()
+	userID := uniqueUser(t, mockTokens)
 	rec := sampleWriteGraph()
-	graphID := registerReadyEntry(t, userID, "github", "alice", "myrepo", "main")
+	graphID := registerReadyEntry(t, mockGraphs, userID, "github", "alice", "myrepo", "main")
 
 	putCount := 0
 	var capturedContent string
@@ -546,7 +575,7 @@ func TestUpdateLayout_CommitsAllThreePositionsInOneCall(t *testing.T) {
 		{"nodeId": "node-3", "x": 50.0, "y": 60.0},
 	}
 	w := httptest.NewRecorder()
-	HandleUpdateLayout(w, layoutReq(userID, graphID, positions))
+	h.HandleUpdateLayout(w, layoutReq(userID, graphID, positions))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
@@ -578,9 +607,10 @@ func TestUpdateLayout_CommitsAllThreePositionsInOneCall(t *testing.T) {
 
 func TestWriteHandlers_ForbiddenWhenUserIDMismatch(t *testing.T) {
 	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
-	ownerID := uniqueUser(t)
+	h, mockGraphs, mockTokens := newTestGraphsHandler()
+	ownerID := uniqueUser(t, mockTokens)
 	otherID := "other-" + uuid.New().String()
-	graphID := registerReadyEntry(t, ownerID, "github", "alice", "myrepo", "main")
+	graphID := registerReadyEntry(t, mockGraphs, ownerID, "github", "alice", "myrepo", "main")
 
 	cases := []struct {
 		name    string
@@ -588,29 +618,19 @@ func TestWriteHandlers_ForbiddenWhenUserIDMismatch(t *testing.T) {
 		req     *http.Request
 	}{
 		{
-			"updateNodeDescription",
-			HandleUpdateNodeDescription,
-			nodeReq(http.MethodPatch, otherID, graphID, "node-1", map[string]string{"description": "x"}),
-		},
-		{
-			"addNote",
-			HandleAddNote,
-			nodeReq(http.MethodPost, otherID, graphID, "node-1", map[string]string{"content": "x"}),
-		},
-		{
-			"updateNote",
-			HandleUpdateNote,
-			noteReq(http.MethodPatch, otherID, graphID, "node-1", map[string]string{"content": "x"}),
-		},
-		{
-			"deleteNote",
-			HandleDeleteNote,
-			noteReq(http.MethodDelete, otherID, graphID, "node-1", nil),
+			"updateNodeDescriptions",
+			h.HandleUpdateNodeDescriptions,
+			descriptionsReq(otherID, graphID, []map[string]string{{"nodeId": "node-1", "description": "x"}}),
 		},
 		{
 			"updateLayout",
-			HandleUpdateLayout,
+			h.HandleUpdateLayout,
 			layoutReq(otherID, graphID, []map[string]any{{"nodeId": "node-1", "x": 1.0, "y": 2.0}}),
+		},
+		{
+			"commitGraph",
+			h.HandleCommitGraph,
+			graphIDReq(http.MethodPost, otherID, graphID),
 		},
 	}
 
@@ -625,18 +645,17 @@ func TestWriteHandlers_ForbiddenWhenUserIDMismatch(t *testing.T) {
 	}
 }
 
-func TestUpdateNodeDescription_ConflictRetryReturns200(t *testing.T) {
-	// M-3.8: provider returns 422 on first PUT, then 200 on retry.
+func TestUpdateNodeDescriptions_ConflictRetryReturns200(t *testing.T) {
 	t.Setenv("CODEATLAS_ENCRYPTION_KEY", testEncKey)
-	userID := uniqueUser(t)
+	h, mockGraphs, mockTokens := newTestGraphsHandler()
+	userID := uniqueUser(t, mockTokens)
 
 	initial := sampleWriteGraph()
-	// "latest" has an extra node; node-1 has a different description server-side.
 	latest := sampleWriteGraph()
 	latest.Nodes[0].Description = "server-desc"
 	latest.Nodes = append(latest.Nodes, graph.NodeRecord{UUID: "node-4", Name: "new.go", Type: "file"})
 
-	graphID := registerReadyEntry(t, userID, "github", "alice", "myrepo", "main")
+	graphID := registerReadyEntry(t, mockGraphs, userID, "github", "alice", "myrepo", "main")
 
 	callSeq := 0
 	var finalBody struct {
@@ -666,8 +685,8 @@ func TestUpdateNodeDescription_ConflictRetryReturns200(t *testing.T) {
 	overrideHTTPClient(t, srv.URL)
 
 	w := httptest.NewRecorder()
-	HandleUpdateNodeDescription(w, nodeReq(http.MethodPatch, userID, graphID, "node-1",
-		map[string]string{"description": "user desc"}))
+	h.HandleUpdateNodeDescriptions(w, descriptionsReq(userID, graphID,
+		[]map[string]string{{"nodeId": "node-1", "description": "user desc"}}))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
@@ -676,7 +695,6 @@ func TestUpdateNodeDescription_ConflictRetryReturns200(t *testing.T) {
 		t.Errorf("expected 4 provider calls (GET, PUT422, GET, PUT200), got %d", callSeq)
 	}
 
-	// Decode the merged record from the final PUT.
 	decoded, err := base64.StdEncoding.DecodeString(finalBody.Content)
 	if err != nil {
 		t.Fatalf("decode final committed content: %v", err)
@@ -684,12 +702,10 @@ func TestUpdateNodeDescription_ConflictRetryReturns200(t *testing.T) {
 	var committed graph.GraphRecord
 	json.Unmarshal(decoded, &committed)
 
-	// Merged structure comes from latest (4 nodes).
 	if len(committed.Nodes) != 4 {
 		t.Errorf("merged record: expected 4 nodes (from latest), got %d", len(committed.Nodes))
 	}
 
-	// node-1 description must be the user-authored value from pending.
 	for _, n := range committed.Nodes {
 		if n.UUID == "node-1" && n.Description != "user desc" {
 			t.Errorf("node-1 Description: got %q, want %q", n.Description, "user desc")

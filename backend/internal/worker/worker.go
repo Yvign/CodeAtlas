@@ -16,18 +16,19 @@ import (
 )
 
 type Worker struct {
-	Owner      string
-	Repo       string
-	Branch     string
-	Provider   string
-	Token      string
-	GraphID    string
-	OnComplete func(graphID string, status string, errMsg string)
+	Owner         string
+	Repo          string
+	Branch        string
+	Provider      string
+	Token         string
+	GraphID       string
+	CommitEnabled bool
+	OnComplete    func(graphID string, status string, errMsg string, record *graph.GraphRecord)
 }
 
 func (w *Worker) Run(ctx context.Context) error {
 	fail := func(err error) error {
-		w.OnComplete(w.GraphID, "failed", err.Error())
+		w.OnComplete(w.GraphID, "failed", err.Error(), nil)
 		return err
 	}
 
@@ -54,7 +55,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	result := analyzer.Analyze(files)
 	freshNodes := make([]graph.Node, len(result.Nodes))
 	for i, n := range result.Nodes {
-		freshNodes[i] = graph.Node{Type: n.Type, Name: n.Name, SHA: n.SHA}
+		freshNodes[i] = graph.Node{UUID: n.UUID, Type: n.Type, Name: n.Name, SHA: n.SHA, Path: n.Path}
 	}
 	freshEdges := make([]graph.Edge, len(result.Edges))
 	for i, e := range result.Edges {
@@ -87,7 +88,6 @@ func (w *Worker) Run(ctx context.Context) error {
 			SHA:         n.SHA,
 			Path:        n.Path,
 			Description: n.Description,
-			Note:        n.Notes,
 		}
 	}
 	mergedEdges := make([]graph.EdgeRecord, len(merged.Edges))
@@ -105,13 +105,15 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 
 	// Step 6: commit
-	c := &committer.Committer{Token: w.Token, Provider: w.Provider}
-	_, err = c.CommitGraphFile(ctx, w.Owner, w.Repo, w.Branch, record, currentSHA)
-	if err != nil {
-		return fail(err)
+	if w.CommitEnabled {
+		c := &committer.Committer{Token: w.Token, Provider: w.Provider}
+		if _, err := c.CommitGraphFile(ctx, w.Owner, w.Repo, w.Branch, record, currentSHA); err != nil {
+			return fail(err)
+		}
+		w.OnComplete(w.GraphID, "ready", "", nil)
+	} else {
+		w.OnComplete(w.GraphID, "ready", "", &record)
 	}
-
-	w.OnComplete(w.GraphID, "ready", "")
 	return nil
 }
 
@@ -194,7 +196,6 @@ func (w *Worker) fetchExistingGraph(ctx context.Context) (graph.GraphStructure, 
 			SHA:         n.SHA,
 			Path:        n.Path,
 			Description: n.Description,
-			Notes:       n.Note,
 		}
 	}
 	edges := make([]graph.Edge, len(rec.Edges))

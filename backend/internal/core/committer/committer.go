@@ -121,7 +121,7 @@ func (c *Committer) fetchLatest(ctx context.Context, owner, repo, branch string)
 
 // mergeRecords produces a merged GraphRecord for conflict resolution.
 // Nodes and Edges come from latest (computed repo truth).
-// Description, Note, and Pos are taken from pending for any node whose UUID
+// Description and Pos are taken from pending for any node whose UUID
 // matches (user-authored fields win). Metadata comes from pending.
 func mergeRecords(pending, latest graph.GraphRecord) graph.GraphRecord {
 	pendingByUUID := make(map[string]graph.NodeRecord, len(pending.Nodes))
@@ -133,7 +133,6 @@ func mergeRecords(pending, latest graph.GraphRecord) graph.GraphRecord {
 	for i, n := range merged.Nodes {
 		if p, ok := pendingByUUID[n.UUID]; ok {
 			merged.Nodes[i].Description = p.Description
-			merged.Nodes[i].Note = p.Note
 			merged.Nodes[i].Pos = p.Pos
 		}
 	}

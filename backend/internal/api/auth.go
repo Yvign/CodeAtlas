@@ -9,12 +9,18 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/google/uuid"
+
+	"CodeAtlas/internal/db"
 )
+
+// AuthHandler holds the repositories used by auth endpoints.
+type AuthHandler struct {
+	Users  db.UserRepository
+	Tokens db.TokenRepository
+}
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -89,8 +95,6 @@ var (
 	githubUserEndpoint  = "https://api.github.com/user"
 )
 
-var tokenStore sync.Map // userID → encrypted access token (string)
-
 type githubTokenResponse struct {
 	AccessToken string `json:"access_token"`
 	Scope       string `json:"scope"`
@@ -102,7 +106,7 @@ type githubUser struct {
 	Login string `json:"login"`
 }
 
-func HandleGithubLogin(w http.ResponseWriter, r *http.Request) {
+func (h *AuthHandler) HandleGithubLogin(w http.ResponseWriter, r *http.Request) {
 	state, err := generateState()
 	if err != nil {
 		http.Error(w, "failed to generate state", http.StatusInternalServerError)
@@ -118,7 +122,7 @@ func HandleGithubLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "https://github.com/login/oauth/authorize?"+params.Encode(), http.StatusFound)
 }
 
-func HandleGithubCallback(w http.ResponseWriter, r *http.Request) {
+func (h *AuthHandler) HandleGithubCallback(w http.ResponseWriter, r *http.Request) {
 	// Step 1: State validation
 	if !validateState(w, r) {
 		return
@@ -149,11 +153,17 @@ func HandleGithubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 4: Upsert user (UUID placeholder until DB integration)
-	userID := uuid.New().String()
-	_ = fmt.Sprintf("provider_user:%d login:%s", ghUser.ID, ghUser.Login)
+	// Step 4: Find or create user
+	providerUserID := fmt.Sprintf("%d", ghUser.ID)
+	userID, err := h.Users.FindOrCreateByProvider(r.Context(), "github", providerUserID, ghUser.Login)
+	if err != nil {
+		WriteJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": map[string]string{"code": "db_error", "message": "failed to find or create user"},
+		})
+		return
+	}
 
-	// Step 5: Encrypt and store OAuth token
+	// Step 5: Encrypt and upsert OAuth token
 	encryptedToken, err := encryptToken(tokenResp.AccessToken, os.Getenv("CODEATLAS_ENCRYPTION_KEY"))
 	if err != nil {
 		WriteJSON(w, http.StatusInternalServerError, map[string]any{
@@ -161,9 +171,20 @@ func HandleGithubCallback(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	tokenStore.Store(userID, encryptedToken)
+	if err := h.Tokens.Upsert(r.Context(), db.OAuthToken{
+		UserID:           userID,
+		Provider:         "github",
+		ProviderUserID:   providerUserID,
+		ProviderUsername: ghUser.Login,
+		AccessToken:      encryptedToken,
+	}); err != nil {
+		WriteJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": map[string]string{"code": "db_error", "message": "failed to store token"},
+		})
+		return
+	}
 
-	// Step 6: Issue JWT
+	// Step 6: Issue JWT and set HttpOnly cookie
 	signed, err := issueJWT(userID)
 	if err != nil {
 		WriteJSON(w, http.StatusInternalServerError, map[string]any{
@@ -172,7 +193,20 @@ func HandleGithubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, map[string]string{"token": signed, "username": ghUser.Login})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "codeatlas_jwt",
+		Value:    signed,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Path:     "/",
+		MaxAge:   86400,
+	})
+
+	frontendURL := os.Getenv("CODEATLAS_FRONTEND_URL")
+	if frontendURL == "" {
+		frontendURL = "http://localhost:5173"
+	}
+	http.Redirect(w, r, frontendURL+"/repos", http.StatusFound)
 }
 
 func exchangeGithubCode(code string) (*githubTokenResponse, error) {
@@ -248,15 +282,7 @@ type gitlabUser struct {
 	Username string `json:"username"`
 }
 
-type gitlabTokenEntry struct {
-	AccessToken  string
-	RefreshToken string
-	ExpiresAt    time.Time
-}
-
-var gitlabTokenStore sync.Map // userID → gitlabTokenEntry
-
-func HandleGitlabLogin(w http.ResponseWriter, r *http.Request) {
+func (h *AuthHandler) HandleGitlabLogin(w http.ResponseWriter, r *http.Request) {
 	state, err := generateState()
 	if err != nil {
 		http.Error(w, "failed to generate state", http.StatusInternalServerError)
@@ -274,7 +300,7 @@ func HandleGitlabLogin(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "https://gitlab.com/oauth/authorize?"+params.Encode(), http.StatusFound)
 }
 
-func HandleGitlabCallback(w http.ResponseWriter, r *http.Request) {
+func (h *AuthHandler) HandleGitlabCallback(w http.ResponseWriter, r *http.Request) {
 	// Step 1: State validation
 	if !validateState(w, r) {
 		return
@@ -305,11 +331,17 @@ func HandleGitlabCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Step 4: Upsert user (UUID placeholder until DB integration)
-	userID := uuid.New().String()
-	_ = fmt.Sprintf("provider_user:%d username:%s", glUser.ID, glUser.Username)
+	// Step 4: Find or create user
+	providerUserID := fmt.Sprintf("%d", glUser.ID)
+	userID, err := h.Users.FindOrCreateByProvider(r.Context(), "gitlab", providerUserID, glUser.Username)
+	if err != nil {
+		WriteJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": map[string]string{"code": "db_error", "message": "failed to find or create user"},
+		})
+		return
+	}
 
-	// Step 5: Encrypt and store tokens
+	// Step 5: Encrypt and upsert OAuth token
 	keyHex := os.Getenv("CODEATLAS_ENCRYPTION_KEY")
 	encryptedAccess, err := encryptToken(tokenResp.AccessToken, keyHex)
 	if err != nil {
@@ -318,10 +350,17 @@ func HandleGitlabCallback(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	entry := gitlabTokenEntry{
-		AccessToken: encryptedAccess,
-		ExpiresAt:   time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+
+	expiresAt := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
+	oauthToken := db.OAuthToken{
+		UserID:           userID,
+		Provider:         "gitlab",
+		ProviderUserID:   providerUserID,
+		ProviderUsername: glUser.Username,
+		AccessToken:      encryptedAccess,
+		TokenExpiresAt:   &expiresAt,
 	}
+
 	if tokenResp.RefreshToken != "" {
 		encryptedRefresh, err := encryptToken(tokenResp.RefreshToken, keyHex)
 		if err != nil {
@@ -330,11 +369,17 @@ func HandleGitlabCallback(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		entry.RefreshToken = encryptedRefresh
+		oauthToken.RefreshToken = encryptedRefresh
 	}
-	gitlabTokenStore.Store(userID, entry)
 
-	// Step 6: Issue JWT
+	if err := h.Tokens.Upsert(r.Context(), oauthToken); err != nil {
+		WriteJSON(w, http.StatusInternalServerError, map[string]any{
+			"error": map[string]string{"code": "db_error", "message": "failed to store token"},
+		})
+		return
+	}
+
+	// Step 6: Issue JWT and set HttpOnly cookie
 	signed, err := issueJWT(userID)
 	if err != nil {
 		WriteJSON(w, http.StatusInternalServerError, map[string]any{
@@ -343,7 +388,20 @@ func HandleGitlabCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	WriteJSON(w, http.StatusOK, map[string]string{"token": signed, "username": glUser.Username})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "codeatlas_jwt",
+		Value:    signed,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Path:     "/",
+		MaxAge:   86400,
+	})
+
+	frontendURL := os.Getenv("CODEATLAS_FRONTEND_URL")
+	if frontendURL == "" {
+		frontendURL = "http://localhost:5173"
+	}
+	http.Redirect(w, r, frontendURL+"/repos", http.StatusFound)
 }
 
 func exchangeGitlabCode(code string) (*gitlabTokenResponse, error) {
@@ -399,4 +457,59 @@ func fetchGitlabUser(accessToken string) (*gitlabUser, error) {
 		return nil, err
 	}
 	return &user, nil
+}
+
+// ── Logout ────────────────────────────────────────────────────────────────────
+
+// HandleLogout clears the JWT cookie and returns 200.
+func (h *AuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "codeatlas_jwt",
+		Value:    "",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Path:     "/",
+		MaxAge:   -1,
+	})
+	WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// HandleMe returns the authenticated user's ID, provider, and username.
+func (h *AuthHandler) HandleMe(w http.ResponseWriter, r *http.Request) {
+	userID, ok := UserIDFromContext(r)
+	if !ok {
+		WriteJSON(w, http.StatusUnauthorized, map[string]any{
+			"error": map[string]string{"code": "unauthorized", "message": "unauthorized"},
+		})
+		return
+	}
+
+	var token *db.OAuthToken
+	var provider string
+	for _, p := range []string{"github", "gitlab"} {
+		t, err := h.Tokens.FindByUserAndProvider(r.Context(), userID, p)
+		if err != nil {
+			WriteJSON(w, http.StatusInternalServerError, map[string]any{
+				"error": map[string]string{"code": "db_error", "message": "failed to look up token"},
+			})
+			return
+		}
+		if t != nil {
+			token = t
+			provider = p
+			break
+		}
+	}
+	if token == nil {
+		WriteJSON(w, http.StatusUnauthorized, map[string]any{
+			"error": map[string]string{"code": "no_token", "message": "no token found for user"},
+		})
+		return
+	}
+
+	WriteJSON(w, http.StatusOK, map[string]any{
+		"userID":   userID,
+		"provider": provider,
+		"username": token.ProviderUsername,
+	})
 }

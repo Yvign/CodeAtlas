@@ -1,41 +1,48 @@
-import { useState, useEffect } from "react"
+import { useShallow } from 'zustand/react/shallow'
 import { AppNode } from "./Nodes"
+import { useStore } from "../store"
 
-function SideBar({ togglefunc, selectedNode, onSave }: { togglefunc: () => void, selectedNode: AppNode | null, onSave: (nodeId: string, notes: string[]) => void }) {
-    const [localNotes, setLocalNotes] = useState<string[]>([])
-    const [inputValue, setInputValue] = useState("")
-    const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false)
+function SideBar({ togglefunc, selectedNode }: { togglefunc: () => void, selectedNode: AppNode | null }) {
+    const { edges, nodes, visibleDependencyEdges, graphRecord, pendingDescriptions, setPendingDescription, revertPendingDescription } = useStore(useShallow((state) => ({
+        edges: state.edges,
+        nodes: state.nodes,
+        visibleDependencyEdges: state.visibleDependencyEdges,
+        graphRecord: state.graphRecord,
+        pendingDescriptions: state.pendingDescriptions,
+        setPendingDescription: state.setPendingDescription,
+        revertPendingDescription: state.revertPendingDescription,
+    })))
 
-    // Sync local state when a new node is selected
-    useEffect(() => {
-        if (selectedNode) {
-            setLocalNotes(selectedNode.data.Notes || [])
-            setInputValue("")
-            setHasUnsavedChanges(false)
-        }
-    }, [selectedNode])
+    const nodeRecord = selectedNode
+        ? graphRecord?.nodes.find((n) => n.uuid === selectedNode.id) ?? null
+        : null
 
-    const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-        if (e.key === 'Enter' && inputValue.trim() !== '') {
-            setLocalNotes([...localNotes, inputValue.trim()])
-            setInputValue("")
-            setHasUnsavedChanges(true)
-        }
+    const importRelationships = selectedNode && selectedNode.type === 'file'
+        ? edges
+            .filter((e) => visibleDependencyEdges.has(e.id))
+            .map((e) => {
+                const otherId = e.source === selectedNode.id ? e.target : e.source
+                return nodes.find((n) => n.id === otherId)?.data.label
+            })
+            .filter((label): label is string => Boolean(label))
+        : []
+
+    // The textarea always reflects global pending state (if this node has an
+    // unsaved edit) falling back to the last-persisted description — never
+    // local component state, so switching nodes doesn't lose an in-progress edit.
+    const isDirty = selectedNode !== null && selectedNode.id in pendingDescriptions
+    const currentDescription = selectedNode
+        ? (pendingDescriptions[selectedNode.id] ?? nodeRecord?.description ?? "")
+        : ""
+
+    const handleChange = (value: string) => {
+        if (!selectedNode) return
+        setPendingDescription(selectedNode.id, value)
     }
 
-    const handleSave = () => {
-        if (selectedNode) {
-            onSave(selectedNode.id, localNotes)
-            setHasUnsavedChanges(false)
-        }
-    }
-
-    const handleCancel = () => {
-        if (selectedNode) {
-            setLocalNotes(selectedNode.data.Notes || [])
-            setInputValue("")
-            setHasUnsavedChanges(false)
-        }
+    const handleRevert = () => {
+        if (!selectedNode) return
+        revertPendingDescription(selectedNode.id)
     }
 
     return (
@@ -43,71 +50,77 @@ function SideBar({ togglefunc, selectedNode, onSave }: { togglefunc: () => void,
             {/* Header */}
             <div className="flex justify-between items-center p-5 border-b border-slate-700 bg-slate-900/50">
                 <h2 className="text-xl font-bold tracking-wide">
-                    {selectedNode ? selectedNode.data.label : 'Details'}
+                    {nodeRecord ? nodeRecord.name : 'Details'}
                 </h2>
-                <button 
-                    onClick={togglefunc} 
+                <button
+                    onClick={togglefunc}
                     className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-slate-700 text-slate-400 hover:text-white transition-colors"
                 >
                     ✕
                 </button>
             </div>
-            
+
             {/* Body */}
             <div className="p-5 flex-1 overflow-y-auto space-y-4">
-                {selectedNode ? (
+                {nodeRecord ? (
                     <>
                         <div className="bg-slate-900/50 p-4 rounded-xl border border-slate-700">
-                            <p className="text-sm text-slate-400 uppercase tracking-widest mb-1 font-semibold">Type</p>
-                            <p className="text-lg font-medium capitalize">{selectedNode.type}</p>
+                            <p className="text-sm text-slate-400 uppercase tracking-widest mb-1 font-semibold">Name</p>
+                            <p className="text-lg font-medium">{nodeRecord.name}</p>
                         </div>
-                        
+
                         <div className="bg-slate-900/50 p-4 rounded-xl border border-slate-700">
-                            <p className="text-sm text-slate-400 uppercase tracking-widest mb-1 font-semibold">Description</p>
-                            <p className="text-md leading-relaxed">
-                                {selectedNode.data.Nodedesc || 'No description provided.'}
-                            </p>
+                            <p className="text-sm text-slate-400 uppercase tracking-widest mb-1 font-semibold">Path</p>
+                            <p className="text-md break-all">{nodeRecord.path || '—'}</p>
                         </div>
 
-                        {/* Notes Section */}
-                        <div className="mt-8 pt-6 border-t border-slate-700 flex flex-col h-full">
-                            <p className="text-sm text-slate-400 uppercase tracking-widest mb-3 font-semibold">Notes</p>
-                            <input 
-                                name="description" 
-                                type="text" 
-                                value={inputValue}
-                                onChange={(e) => setInputValue(e.target.value)}
-                                onKeyDown={handleKeyDown}
-                                placeholder="Type a note and hit Enter..."
-                                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-sky-500 transition-colors"
+                        <div className="bg-slate-900/50 p-4 rounded-xl border border-slate-700">
+                            <p className="text-sm text-slate-400 uppercase tracking-widest mb-1 font-semibold">Type</p>
+                            <p className="text-lg font-medium capitalize">{nodeRecord.type}</p>
+                        </div>
+
+                        {importRelationships.length > 0 && (
+                            <div className="bg-slate-900/50 p-4 rounded-xl border border-slate-700">
+                                <p className="text-sm text-slate-400 uppercase tracking-widest mb-2 font-semibold">Import relationships</p>
+                                <ul className="space-y-1 text-sm text-slate-300">
+                                    {importRelationships.map((name, index) => (
+                                        <li key={index} className="flex items-center gap-2">
+                                            <span className="text-indigo-400">↔</span>
+                                            {name}
+                                        </li>
+                                    ))}
+                                </ul>
+                            </div>
+                        )}
+
+                        <div className="bg-slate-900/50 p-4 rounded-xl border border-slate-700">
+                            <div className="flex items-center justify-between mb-2">
+                                <p className="text-sm text-slate-400 uppercase tracking-widest font-semibold">Description</p>
+                                {isDirty && (
+                                    <span className="text-xs text-amber-400 font-medium">Unsaved</span>
+                                )}
+                            </div>
+                            <textarea
+                                value={currentDescription}
+                                onChange={(e) => handleChange(e.target.value)}
+                                placeholder="No description provided."
+                                rows={6}
+                                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-2 text-sm focus:outline-none focus:border-sky-500 transition-colors resize-none"
                             />
-                            <ul className="mt-4 text-sm text-slate-300 space-y-2">
-                                {localNotes.map((note, index) => (
-                                    <li key={index} className="flex items-start bg-slate-700/30 p-2 rounded-lg">
-                                        <span className="mr-2 text-sky-500">•</span>
-                                        <p>{note}</p>
-                                    </li>
-                                ))}
-                            </ul>
-
-                            {/* Save / Cancel buttons appear only when there are unsaved changes */}
-                            {hasUnsavedChanges && (
-                                <div className="mt-6 pt-4 border-t border-slate-700 flex space-x-3">
-                                    <button 
-                                        onClick={handleSave}
-                                        className="flex-1 bg-sky-600 hover:bg-sky-500 text-white py-2 rounded-lg text-sm font-semibold transition-colors shadow-lg shadow-sky-900/20"
-                                    >
-                                        Save
-                                    </button>
-                                    <button 
-                                        onClick={handleCancel}
-                                        className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-200 py-2 rounded-lg text-sm font-semibold transition-colors"
-                                    >
-                                        Cancel
-                                    </button>
-                                </div>
-                            )}
                         </div>
+
+                        {/* Saving happens globally (see the canvas toolbar) — this only
+                            reverts this node's pending edit back to its last-saved value. */}
+                        {isDirty && (
+                            <div className="pt-4 border-t border-slate-700">
+                                <button
+                                    onClick={handleRevert}
+                                    className="w-full bg-slate-700 hover:bg-slate-600 text-slate-200 py-2 rounded-lg text-sm font-semibold transition-colors"
+                                >
+                                    Revert
+                                </button>
+                            </div>
+                        )}
                     </>
                 ) : (
                     <div className="h-full flex flex-col items-center justify-center text-slate-500 space-y-3">

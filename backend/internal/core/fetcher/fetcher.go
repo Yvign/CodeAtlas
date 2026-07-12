@@ -43,6 +43,9 @@ var filterFilesPath = map[string]bool{
 	".idea":        true,
 }
 
+// allowedExtensions controls which blobs get their content fetched and
+// later parsed for imports. Files with other extensions still become graph
+// nodes — they just don't get content fetched or parsed for edges.
 var allowedExtensions = map[string]bool{
 	".js":  true,
 	".ts":  true,
@@ -229,25 +232,22 @@ func FetchfileTree(provider Provider, owner, repo, branch, token string) ([]File
 		queue = append(queue, provider.NextPage(body, headers, current)...)
 	}
 
-	// Drop blobs whose extension is not in the allowed set.
-	kept := fetchedFiles[:0]
-	for _, f := range fetchedFiles {
-		if f.Type == "blob" && !allowedExtensions[filepath.Ext(f.Path)] {
-			continue
-		}
-		kept = append(kept, f)
-	}
-	fetchedFiles = kept
-
-	// Collect only blobs; trees have no content to fetch.
+	// Collect blobs whose content is needed for import parsing. Every other
+	// file (and every tree) still passes through as a node, just without
+	// fetched content.
 	var blobs []FileData
 	var blobIndices []int
 	for i, item := range fetchedFiles {
-		if item.Type == "blob" {
-			blobs = append(blobs, item)
-			blobIndices = append(blobIndices, i)
+		if item.Type != "blob" {
+			continue
 		}
+		if !allowedExtensions[strings.ToLower(filepath.Ext(item.Path))] {
+			continue
+		}
+		blobs = append(blobs, item)
+		blobIndices = append(blobIndices, i)
 	}
+	fmt.Printf("fetcher: %d files after extension filter (from %d total)\n", len(blobs), len(fetchedFiles))
 
 	var fileDataErr []error
 	for start := 0; start < len(blobs); start += blobBatchSize {

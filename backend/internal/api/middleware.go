@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"os"
-	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -20,17 +19,15 @@ func UserIDFromContext(r *http.Request) (string, bool) {
 
 func JWTMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+		cookie, err := r.Cookie("codeatlas_jwt")
+		if err != nil {
 			WriteJSON(w, http.StatusUnauthorized, map[string]any{
-				"error": map[string]string{"code": "missing_token", "message": "authorization header required"},
+				"error": map[string]string{"code": "missing_token", "message": "not authenticated"},
 			})
 			return
 		}
 
-		tokenStr := strings.TrimPrefix(authHeader, "Bearer ")
-
-		tok, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
+		tok, err := jwt.Parse(cookie.Value, func(t *jwt.Token) (any, error) {
 			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, jwt.ErrSignatureInvalid
 			}

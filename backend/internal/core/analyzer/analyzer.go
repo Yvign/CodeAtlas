@@ -1,17 +1,23 @@
 package analyzer
 
 import (
+	"fmt"
 	"path"
+	"path/filepath"
 	"strings"
+
+	"github.com/google/uuid"
 
 	"CodeAtlas/internal/core/fetcher"
 	"CodeAtlas/internal/core/graph"
 )
 
 type Node struct {
+	UUID        string
 	Type        string
 	Name        string
 	SHA         string
+	Path        string
 	Description string
 	Notes       string
 }
@@ -34,15 +40,32 @@ func Analyze(files []fetcher.FileData) AnalysisResult {
 	}
 
 	var nodes []Node
-	var edges []Edge
-
 	for _, f := range files {
+		nodeType := "file"
+		if f.Type == "tree" {
+			nodeType = "directory"
+		}
 		nodes = append(nodes, Node{
-			Type: "file",
+			UUID: uuid.NewString(),
+			Type: nodeType,
 			Name: path.Base(f.Path),
 			SHA:  f.SHA,
+			Path: f.Path,
 		})
+	}
 
+	// Build a path → UUID lookup so dependency and parent-child edges
+	// reference node identities instead of paths.
+	pathToUUID := make(map[string]string, len(nodes))
+	for _, n := range nodes {
+		pathToUUID[n.Path] = n.UUID
+	}
+
+	var edges []Edge
+
+	// Dependency edges (import resolution), deduplicated by source+target UUID.
+	seenDepEdge := make(map[[2]string]bool)
+	for _, f := range files {
 		if f.Type != "blob" {
 			continue
 		}
@@ -60,24 +83,50 @@ func Analyze(files []fetcher.FileData) AnalysisResult {
 		}
 
 		imports := ParseFile(f.RawFileData, f.Path)
+		fmt.Printf("analyzer: %s → %d imports found\n", f.Path, len(imports))
 		for _, raw := range imports {
 			resolved := resolve(f.Path, raw, pathSet)
 			if resolved == "" {
 				continue
 			}
-			edges = append(edges, Edge{Source: f.Path, Target: resolved, Type: graph.EdgeTypeDependency})
+			sourceUUID, sourceOK := pathToUUID[f.Path]
+			targetUUID, targetOK := pathToUUID[resolved]
+			if !sourceOK || !targetOK {
+				continue
+			}
+			key := [2]string{sourceUUID, targetUUID}
+			if seenDepEdge[key] {
+				continue
+			}
+			seenDepEdge[key] = true
+			edges = append(edges, Edge{Source: sourceUUID, Target: targetUUID, Type: graph.EdgeTypeDependency})
 		}
 	}
 
-	for _, f := range files {
-		dir := path.Dir(f.Path)
+	for _, n := range nodes {
+		dir := filepath.Dir(n.Path)
 		if dir == "." {
 			continue
 		}
-		if pathSet[dir] {
-			edges = append(edges, Edge{Source: dir, Target: f.Path, Type: graph.EdgeTypeContains})
+		childUUID, childOK := pathToUUID[n.Path]
+		parentUUID, parentOK := pathToUUID[dir]
+		if !childOK || !parentOK {
+			continue
+		}
+		edges = append(edges, Edge{Source: parentUUID, Target: childUUID, Type: graph.EdgeTypeContains})
+	}
+
+	depEdgeCount := 0
+	containsEdgeCount := 0
+	for _, e := range edges {
+		switch e.Type {
+		case graph.EdgeTypeDependency:
+			depEdgeCount++
+		case graph.EdgeTypeContains:
+			containsEdgeCount++
 		}
 	}
+	fmt.Printf("analyzer: total %d nodes, %d dependency edges, %d contains edges\n", len(nodes), depEdgeCount, containsEdgeCount)
 
 	return AnalysisResult{Nodes: nodes, Edges: edges}
 }

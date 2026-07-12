@@ -203,7 +203,7 @@ func TestCommitGraphFile_ConflictResolvedOnRetry(t *testing.T) {
 		RepoName:    "myrepo",
 		Branch:      "main",
 		Nodes: []graph.NodeRecord{
-			{UUID: "u1", Name: "index.ts", Type: "file", Description: "entry point", Note: "important", Pos: graph.Position{X: 1, Y: 2}},
+			{UUID: "u1", Name: "index.ts", Type: "file", Description: "entry point", Pos: graph.Position{X: 1, Y: 2}},
 		},
 		Edges: []graph.EdgeRecord{{Source: "u1", Target: "u2", Type: "dependency"}},
 	}
@@ -216,7 +216,7 @@ func TestCommitGraphFile_ConflictResolvedOnRetry(t *testing.T) {
 		RepoName:    "myrepo",
 		Branch:      "main",
 		Nodes: []graph.NodeRecord{
-			{UUID: "u1", Name: "index.ts", Type: "file", Description: "old desc", Note: "old note", Pos: graph.Position{X: 10, Y: 20}},
+			{UUID: "u1", Name: "index.ts", Type: "file", Description: "old desc", Pos: graph.Position{X: 10, Y: 20}},
 			{UUID: "u2", Name: "utils.ts", Type: "file", SHA: "sha-u2", Path: "src/utils.ts"},
 		},
 		Edges: []graph.EdgeRecord{
@@ -318,9 +318,6 @@ func TestCommitGraphFile_ConflictResolvedOnRetry(t *testing.T) {
 	if u1.Description != "entry point" {
 		t.Errorf("u1 Description: got %q, want %q", u1.Description, "entry point")
 	}
-	if u1.Note != "important" {
-		t.Errorf("u1 Note: got %q, want %q", u1.Note, "important")
-	}
 	if u1.Pos != (graph.Position{X: 1, Y: 2}) {
 		t.Errorf("u1 Pos: got %+v, want {1, 2}", u1.Pos)
 	}
@@ -345,8 +342,8 @@ func TestCommitGraphFile_ConflictResolvedOnRetry(t *testing.T) {
 	if u2.Path != "src/utils.ts" {
 		t.Errorf("u2 Path: got %q, want %q", u2.Path, "src/utils.ts")
 	}
-	if u2.Description != "" || u2.Note != "" || u2.Pos != (graph.Position{}) {
-		t.Errorf("u2 user-authored fields should be zero, got Description=%q Note=%q Pos=%+v", u2.Description, u2.Note, u2.Pos)
+	if u2.Description != "" || u2.Pos != (graph.Position{}) {
+		t.Errorf("u2 user-authored fields should be zero, got Description=%q Pos=%+v", u2.Description, u2.Pos)
 	}
 
 	// Metadata comes from pending.
