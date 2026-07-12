@@ -60,28 +60,31 @@ func main() {
 		MaxAge:           300,
 	}))
 
-	r.Get("/auth/github/login", authH.HandleGithubLogin)
-	r.Get("/auth/github/callback", authH.HandleGithubCallback)
-	r.Get("/auth/gitlab/login", authH.HandleGitlabLogin)
-	r.Get("/auth/gitlab/callback", authH.HandleGitlabCallback)
-	r.Post("/auth/logout", authH.HandleLogout)
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		api.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 
-	r.Group(func(r chi.Router) {
-		r.Use(api.JWTMiddleware)
+	r.Route("/api", func(r chi.Router) {
+		r.Get("/auth/github/login", authH.HandleGithubLogin)
+		r.Get("/auth/github/callback", authH.HandleGithubCallback)
+		r.Get("/auth/gitlab/login", authH.HandleGitlabLogin)
+		r.Get("/auth/gitlab/callback", authH.HandleGitlabCallback)
+		r.Post("/auth/logout", authH.HandleLogout)
 
-		r.Get("/auth/me", authH.HandleMe)
-		r.Get("/repos", reposH.HandleListRepos)
-		r.Get("/repos/{provider}/{owner}/{repo}/branches", reposH.HandleListBranches)
-		r.Get("/graphs", graphsH.HandleListGraphs)
-		r.Post("/graphs", graphsH.HandleCreateGraph)
-		r.Get("/graphs/{id}", graphsH.HandleGetGraph)
-		r.Delete("/graphs/{id}", graphsH.HandleDeleteGraph)
-		r.Patch("/graphs/{id}/nodes", graphsH.HandleUpdateNodeDescriptions)
-		r.Post("/graphs/{id}/commit", graphsH.HandleCommitGraph)
-		r.Patch("/graphs/{id}/layout", graphsH.HandleUpdateLayout)
+		r.Group(func(r chi.Router) {
+			r.Use(api.JWTMiddleware)
+
+			r.Get("/auth/me", authH.HandleMe)
+			r.Get("/repos", reposH.HandleListRepos)
+			r.Get("/repos/{provider}/{owner}/{repo}/branches", reposH.HandleListBranches)
+			r.Get("/graphs", graphsH.HandleListGraphs)
+			r.Post("/graphs", graphsH.HandleCreateGraph)
+			r.Get("/graphs/{id}", graphsH.HandleGetGraph)
+			r.Delete("/graphs/{id}", graphsH.HandleDeleteGraph)
+			r.Patch("/graphs/{id}/nodes", graphsH.HandleUpdateNodeDescriptions)
+			r.Post("/graphs/{id}/commit", graphsH.HandleCommitGraph)
+			r.Patch("/graphs/{id}/layout", graphsH.HandleUpdateLayout)
+		})
 	})
 
 	port := os.Getenv("CODEATLAS_PORT")
