@@ -35,7 +35,7 @@ Sign in with **GitHub** or **GitLab** to grant CodeAtlas read access to your rep
 no cloning, no local setup on your end.
 
 ![Sign in](screenshots/SS1.png)
-![Authorize](creenshots/SS2.png)
+![Authorize](screenshots/SS2.png)
 ### Step 2 — Select a Repository
 
 Once signed in, pick a repository and branch from the list. There's no "paste a local
@@ -82,7 +82,7 @@ Select any node to see how it fits into the rest of the codebase:
 * When you're happy with the map, **commit it back to the repository** so your annotations
   and layout become part of the project's history, not just something sitting in CodeAtlas.
 
-![Inspecting a node's dependencies](creenshots/SS5.png)
+![Inspecting a node's dependencies](screenshots/SS5.png)
 
 ---
 
