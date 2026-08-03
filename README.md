@@ -24,8 +24,8 @@ you'll see.
 
 ```
 ┌───────────┐    ┌───────────────┐    ┌──────────────┐    ┌─────────────┐    ┌────────────┐
-│ 1. Sign In │ ─► │ 2. Select a   │ ─► │ 3. Generate  │ ─► │ 4. Navigate │ ─► │ 5. Inspect │
-│            │    │    Repository │    │ Map & Layout │    │  & Filter   │    │Dependencies│
+│ 1.Sign In │ ─► │ 2. Select a   │ ─► │ 3. Generate  │ ─► │ 4. Navigate │ ─► │ 5. Inspect │
+│           │    │    Repository │    │ Map & Layout │    │  & Filter   │    │Dependencies│
 └───────────┘    └───────────────┘    └──────────────┘    └─────────────┘    └────────────┘
 ```
 
@@ -35,7 +35,7 @@ Sign in with **GitHub** or **GitLab** to grant CodeAtlas read access to your rep
 no cloning, no local setup on your end.
 
 ![Sign in](screenshots/SS1.png)
-![Authorize](screenshots/SS2.png)
+![Authorize](screenshots/SS2.jpeg)
 ### Step 2 — Select a Repository
 
 Once signed in, pick a repository and branch from the list. There's no "paste a local
